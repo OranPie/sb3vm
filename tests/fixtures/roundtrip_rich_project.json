@@ -1,0 +1,75 @@
+{
+  "targets": [
+    {
+      "isStage": true,
+      "name": "Stage",
+      "variables": {
+        "v1": ["score", 0]
+      },
+      "lists": {
+        "l1": ["history", ["a", "b"]]
+      },
+      "broadcasts": {
+        "b1": "go"
+      },
+      "blocks": {},
+      "comments": {
+        "c1": {
+          "blockId": null,
+          "text": "keep me"
+        }
+      },
+      "costumes": [
+        {
+          "assetId": "abc",
+          "md5ext": "abc.svg",
+          "name": "backdrop1"
+        }
+      ],
+      "sounds": [],
+      "customField": {
+        "nested": [1, 2, 3]
+      }
+    },
+    {
+      "isStage": false,
+      "name": "Sprite1",
+      "variables": {},
+      "lists": {},
+      "broadcasts": {},
+      "blocks": {},
+      "comments": {},
+      "costumes": [
+        {
+          "assetId": "sprite",
+          "md5ext": "sprite.svg",
+          "name": "costume1"
+        }
+      ],
+      "sounds": [
+        {
+          "assetId": "snd",
+          "md5ext": "snd.wav",
+          "name": "ping"
+        }
+      ],
+      "x": 10,
+      "y": -4,
+      "visible": false
+    }
+  ],
+  "monitors": [
+    {
+      "id": "monitor1",
+      "opcode": "data_variable"
+    }
+  ],
+  "extensions": ["pen"],
+  "meta": {
+    "semver": "3.0.0",
+    "vm": "tests"
+  },
+  "extraTopLevel": {
+    "preserve": true
+  }
+}

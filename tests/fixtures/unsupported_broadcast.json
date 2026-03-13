@@ -1,0 +1,44 @@
+{
+  "targets": [
+    {
+      "isStage": true,
+      "name": "Stage",
+      "variables": {
+        "v1": ["score", 0]
+      },
+      "lists": {},
+      "broadcasts": {
+        "b1": "go"
+      },
+      "blocks": {
+        "hat": {
+          "opcode": "event_whenflagclicked",
+          "next": "say",
+          "parent": null,
+          "inputs": {},
+          "fields": {},
+          "topLevel": true
+        },
+        "say": {
+          "opcode": "looks_say",
+          "next": null,
+          "parent": "hat",
+          "inputs": {
+            "MESSAGE": [1, [10, "hello"]]
+          },
+          "fields": {},
+          "topLevel": false
+        }
+      },
+      "comments": {},
+      "costumes": [],
+      "sounds": []
+    }
+  ],
+  "monitors": [],
+  "extensions": [],
+  "meta": {
+    "semver": "3.0.0",
+    "agentFixture": true
+  }
+}

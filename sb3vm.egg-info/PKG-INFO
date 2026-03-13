@@ -1,0 +1,8 @@
+Metadata-Version: 2.4
+Name: sb3vm
+Version: 0.1.0
+Summary: Headless Scratch sb3 VM MVP
+Requires-Python: >=3.10
+Provides-Extra: render
+Requires-Dist: Pillow>=10.0.0; extra == "render"
+Requires-Dist: cairosvg>=2.7.0; extra == "render"
