@@ -55,4 +55,13 @@ class RenderAssetStore:
             raise RendererDependencyError(
                 "SVG rendering requires cairosvg. Install with `pip install 'sb3vm[render]'`."
             ) from exc
-        return cairosvg.svg2png(bytestring=payload)
+        except OSError as exc:
+            raise RendererDependencyError(
+                "SVG rendering requires cairosvg with a working cairo library."
+            ) from exc
+        try:
+            return cairosvg.svg2png(bytestring=payload)
+        except OSError as exc:
+            raise RendererDependencyError(
+                "SVG rendering requires cairosvg with a working cairo library."
+            ) from exc

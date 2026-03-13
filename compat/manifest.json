@@ -1,0 +1,84 @@
+{
+  "fixtures": [
+    {
+      "id": "demo",
+      "kind": "real_project",
+      "path": "projects/demo.sb3",
+      "expected_label": "fully_supported",
+      "runtime": {
+        "seconds": 1.0,
+        "dt": 0.03333333333333333
+      },
+      "expect": {
+        "final_snapshot": "goldens/demo_final.json"
+      }
+    },
+    {
+      "id": "partial_unsupported",
+      "kind": "real_project",
+      "path": "projects/partial_unsupported.sb3",
+      "expected_label": "partially_supported",
+      "runtime": {
+        "seconds": 0.1,
+        "dt": 0.03333333333333333
+      },
+      "expect": {
+        "final_snapshot": "goldens/partial_final.json"
+      }
+    },
+    {
+      "id": "parsed_only",
+      "kind": "real_project",
+      "path": "projects/parsed_only.sb3",
+      "expected_label": "parsed_only",
+      "execute": false
+    },
+    {
+      "id": "timing_broadcast_wait",
+      "kind": "timing_case",
+      "path": "projects/timing_broadcast_wait.sb3",
+      "expected_label": "fully_supported",
+      "runtime": {
+        "steps": 5,
+        "dt": 0.03333333333333333
+      },
+      "expect": {
+        "final_snapshot": "goldens/timing_final.json",
+        "checkpoints": [
+          {
+            "name": "after_step_1",
+            "after_steps": 1,
+            "snapshot": "goldens/timing_step_1.json"
+          },
+          {
+            "name": "after_step_2",
+            "after_steps": 2,
+            "snapshot": "goldens/timing_step_2.json"
+          },
+          {
+            "name": "after_step_3",
+            "after_steps": 3,
+            "snapshot": "goldens/timing_step_3.json"
+          },
+          {
+            "name": "after_step_4",
+            "after_steps": 4,
+            "snapshot": "goldens/timing_step_4.json"
+          },
+          {
+            "name": "after_step_5",
+            "after_steps": 5,
+            "snapshot": "goldens/timing_step_5.json"
+          }
+        ]
+      }
+    },
+    {
+      "id": "invalid_archive",
+      "kind": "real_project",
+      "path": "projects/invalid_archive.sb3",
+      "expected_label": "unsupported",
+      "execute": false
+    }
+  ]
+}

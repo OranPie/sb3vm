@@ -96,7 +96,7 @@ class FixtureRunResult:
 
 
 def default_manifest_path() -> Path:
-    return Path("compat/manifest.json")
+    return Path(__file__).resolve().parents[2] / "compat" / "manifest.json"
 
 
 def run_compat_suite(

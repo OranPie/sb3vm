@@ -30,3 +30,9 @@ Compatibility lab:
 - run the checked-in compatibility corpus with `python -m sb3vm.cli compat`
 - add ad hoc local projects with `python -m sb3vm.cli compat --projects-dir /path/to/sb3s`
 - fail CI on compatibility regressions with `python -m sb3vm.cli compat --fail-on-regression`
+
+Python authoring:
+- scaffold a starter module with `python -m sb3vm.cli py-scaffold authored_project.py`
+- build a Python-authored module into `.sb3` with `python -m sb3vm.cli py-build authored_project.py out.sb3`
+- run a Python-authored module through the VM with `python -m sb3vm.cli py-run authored_project.py --seconds 1`
+- inspect the generated project with `python -m sb3vm.cli py-inspect authored_project.py`
