@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any
+from sb3vm.log import get_logger, instrument_module
+
+
+_LOGGER = get_logger(__name__)
 
 
 @dataclass
@@ -102,3 +106,6 @@ class Script:
     body: list[Stmt]
     supported: bool = True
     unsupported_details: list[UnsupportedDiagnostic] = field(default_factory=list)
+
+
+instrument_module(globals(), _LOGGER)

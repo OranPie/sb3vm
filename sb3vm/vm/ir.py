@@ -4,6 +4,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from sb3vm.parse.ast_nodes import Expr, Script, Stmt
+from sb3vm.log import get_logger, instrument_module
+
+
+_LOGGER = get_logger(__name__)
 
 
 SAFE_EXPR_KINDS = {
@@ -25,6 +29,7 @@ SAFE_EXPR_KINDS = {
     "mouse_x",
     "mouse_y",
     "mouse_down",
+    "touching_object",
     "operator_add",
     "operator_subtract",
     "operator_multiply",
@@ -54,6 +59,7 @@ SAFE_STMT_KINDS = {
     "list_insert",
     "list_replace",
     "wait",
+    "music_play_note",
     "repeat",
     "forever",
     "if",
@@ -190,3 +196,6 @@ def classify_expr(expr: IrExpr) -> str | None:
         if reason is not None:
             return reason
     return None
+
+
+instrument_module(globals(), _LOGGER)

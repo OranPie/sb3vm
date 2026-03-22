@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any
+from sb3vm.log import get_logger, instrument_module
+
+
+_LOGGER = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -49,8 +53,18 @@ class CgTarget:
     sounds: tuple[dict[str, Any], ...] = ()
     x: float = 0.0
     y: float = 0.0
+    direction: float = 90.0
+    size: float = 100.0
     visible: bool = True
+    draggable: bool = False
+    rotation_style: str = "all around"
     current_costume: int = 0
+    volume: float = 100.0
+    layer_order: int = 0
+    tempo: float = 60.0
+    video_transparency: float = 50.0
+    video_state: str = "on"
+    text_to_speech_language: str | None = None
 
 
 @dataclass(frozen=True)
@@ -58,3 +72,8 @@ class CgProject:
     name: str
     targets: tuple[CgTarget, ...]
     broadcasts: tuple[str, ...]
+    extensions: tuple[str, ...] = ()
+    assets: tuple[tuple[str, bytes], ...] = ()
+
+
+instrument_module(globals(), _LOGGER)

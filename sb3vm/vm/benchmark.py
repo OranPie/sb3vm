@@ -5,6 +5,10 @@ from dataclasses import dataclass
 
 from sb3vm.model.project import Project
 from sb3vm.vm.runtime import Sb3Vm
+from sb3vm.log import get_logger, instrument_module
+
+
+_LOGGER = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -72,3 +76,6 @@ def run_benchmark_case(
         interpreted_seconds=interpreted_seconds,
         compiled_seconds=compiled_seconds,
     )
+
+
+instrument_module(globals(), _LOGGER)

@@ -1,0 +1,18 @@
+{
+  "stage_variables": {
+    "done": 1,
+    "keyed": 1,
+    "score": 7
+  },
+  "targets": {
+    "Stage": {
+      "costume_index": 1
+    },
+    "Sprite1": {
+      "dialogue": {
+        "style": "say",
+        "text": "night"
+      }
+    }
+  }
+}

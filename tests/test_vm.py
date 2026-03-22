@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -231,16 +232,16 @@ def test_inspect_reports_structured_unsupported_diagnostics(tmp_path):
     vm = Sb3Vm(load_sb3(path))
     inspect = vm.inspect()
 
-    assert inspect["opcode_coverage"]["unsupported_by_opcode"] == {"looks_say": 1}
+    assert inspect["opcode_coverage"]["unsupported_by_opcode"] == {"motion_movesteps": 1}
     assert inspect["unsupported_scripts"] == [
         {
             "target": "Stage",
             "trigger": "green_flag",
             "value": None,
             "node_kind": "statement",
-            "opcode": "looks_say",
+            "opcode": "motion_movesteps",
             "reason": "unsupported statement opcode",
-            "block_id": "say",
+            "block_id": "move",
         }
     ]
 
@@ -265,6 +266,22 @@ def test_run_uses_stable_snapshot_shape(tmp_path):
     assert snapshot["clone_count"] == 0
     assert snapshot["active_threads"] == 0
     assert snapshot["unsupported_scripts"] == []
+
+
+def test_snapshot_reports_current_statement_status(tmp_path):
+    blocks = {
+        "hat": {"opcode": "event_whenflagclicked", "next": "wait", "parent": None, "inputs": {}, "fields": {}, "topLevel": True},
+        "wait": {"opcode": "control_wait", "next": None, "parent": "hat", "inputs": {"DURATION": [1, [4, "0.2"]]}, "fields": {}, "topLevel": False},
+    }
+    path = tmp_path / "thread_status.sb3"
+    write_sb3(path, _base_project(blocks_stage=blocks))
+
+    vm = Sb3Vm(load_sb3(path))
+    vm.start_green_flag()
+    snapshot = vm.snapshot()
+
+    assert snapshot["thread_status"][0]["current_statement"] == "wait(0.2)"
+    assert snapshot["thread_frames"]["1"]["current_statement"] == "wait(0.2)"
 
 
 def test_missing_block_reference_fails_clearly(tmp_path):
@@ -327,8 +344,8 @@ def test_cli_inspect_emits_opcode_coverage_json(tmp_path):
 
     payload = json.loads(proc.stdout)
     assert proc.returncode == 0
-    assert payload["opcode_coverage"]["by_opcode"]["looks_say"] == 1
-    assert payload["unsupported_scripts"][0]["opcode"] == "looks_say"
+    assert payload["opcode_coverage"]["by_opcode"]["motion_movesteps"] == 1
+    assert payload["unsupported_scripts"][0]["opcode"] == "motion_movesteps"
 
 
 def test_custom_procedure_arguments_and_nested_calls(tmp_path):
@@ -695,6 +712,36 @@ def test_clone_creation_copies_local_state_and_runs_clone_start(tmp_path):
     assert len(clone_instances) == 1
     assert clone_instances[0]["variables"]["local"] == 8.0
     assert clone_instances[0]["x"] == 42.0
+
+
+def test_clone_creation_accepts_raw_myself_menu_value(tmp_path):
+    sprite_blocks = {
+        "hat": {"opcode": "event_whenflagclicked", "next": "clone_self", "parent": None, "inputs": {}, "fields": {}, "topLevel": True},
+        **_create_clone("clone_self", "_myself_", parent="hat"),
+        "clone_hat": {"opcode": "control_start_as_clone", "next": "set_local", "parent": None, "inputs": {}, "fields": {}, "topLevel": True},
+        "set_local": {
+            "opcode": "data_setvariableto",
+            "next": None,
+            "parent": "clone_hat",
+            "inputs": {"VALUE": [1, [4, "9"]]},
+            "fields": {"VARIABLE": ["local", "sv1"]},
+            "topLevel": False,
+        },
+    }
+    project = _base_project(blocks_sprite=sprite_blocks)
+    project["targets"][1]["variables"] = {"sv1": ["local", 0]}
+
+    path = tmp_path / "clone_myself_menu.sb3"
+    write_sb3(path, project)
+
+    vm = Sb3Vm(load_sb3(path))
+    vm.run_for(0.2)
+    snapshot = vm.snapshot()
+
+    clone_instances = [item for item in snapshot["instances"].values() if item["source_target_name"] == "Sprite1" and item["is_clone"]]
+    assert len(clone_instances) == 1
+    assert clone_instances[0]["variables"]["local"] == 9.0
+    assert snapshot["runtime_diagnostics"] == []
 
 
 def test_named_clone_and_broadcast_reaches_original_and_clone_instances(tmp_path):
@@ -1088,6 +1135,170 @@ def test_key_mouse_and_seeded_random_sensing(tmp_path):
     assert sprite["mouse_y_seen"] == -9.0
     assert sprite["mouse_down_seen"] is True
     assert sprite["random_seen"] == 6
+
+
+def test_when_key_pressed_hat_fires_on_press_edges_only(tmp_path):
+    sprite_blocks = {
+        "hat": {
+            "opcode": "event_whenkeypressed",
+            "next": "inc",
+            "parent": None,
+            "inputs": {},
+            "fields": {"KEY_OPTION": ["space", None]},
+            "topLevel": True,
+        },
+        "inc": {
+            "opcode": "data_changevariableby",
+            "next": None,
+            "parent": "hat",
+            "inputs": {"VALUE": [1, [4, "1"]]},
+            "fields": {"VARIABLE": ["hits", "sv1"]},
+            "topLevel": False,
+        },
+    }
+    project = _base_project(blocks_sprite=sprite_blocks)
+    project["targets"][1]["variables"] = {"sv1": ["hits", 0]}
+    provider = HeadlessInputProvider()
+    path = tmp_path / "when_key_pressed.sb3"
+    write_sb3(path, project)
+
+    vm = Sb3Vm(load_sb3(path), input_provider=provider)
+    vm.step(1 / 30)
+    assert vm.snapshot()["targets"]["Sprite1"]["variables"]["hits"] == 0
+
+    provider.pressed_keys.add("space")
+    vm.step(1 / 30)
+    assert vm.snapshot()["targets"]["Sprite1"]["variables"]["hits"] == 1.0
+
+    vm.step(1 / 30)
+    assert vm.snapshot()["targets"]["Sprite1"]["variables"]["hits"] == 1.0
+
+    provider.pressed_keys.clear()
+    vm.step(1 / 30)
+    provider.pressed_keys.add("space")
+    vm.step(1 / 30)
+
+    assert vm.snapshot()["targets"]["Sprite1"]["variables"]["hits"] == 2.0
+
+
+def test_dialogue_blocks_update_snapshot_and_render_state(tmp_path):
+    stage_blocks = {
+        "hat": {"opcode": "event_whenflagclicked", "next": "say", "parent": None, "inputs": {}, "fields": {}, "topLevel": True},
+        "say": {
+            "opcode": "looks_say",
+            "next": None,
+            "parent": "hat",
+            "inputs": {"MESSAGE": [1, [10, "ready"]]},
+            "fields": {},
+            "topLevel": False,
+        },
+    }
+    sprite_blocks = {
+        "hat": {"opcode": "event_whenflagclicked", "next": "think", "parent": None, "inputs": {}, "fields": {}, "topLevel": True},
+        "think": {
+            "opcode": "looks_thinkforsecs",
+            "next": None,
+            "parent": "hat",
+            "inputs": {"MESSAGE": [1, [10, "hmm"]], "SECS": [1, [4, "0.1"]]},
+            "fields": {},
+            "topLevel": False,
+        },
+    }
+    project = _base_project(blocks_stage=stage_blocks, blocks_sprite=sprite_blocks)
+    path = tmp_path / "dialogue.sb3"
+    write_sb3(path, project)
+
+    vm = Sb3Vm(load_sb3(path))
+    vm.start_green_flag()
+    vm.step(1 / 30)
+
+    snapshot = vm.snapshot()
+    render = vm.render_snapshot()
+    sprite_render = next(item for item in render["drawables"] if item["source_target_name"] == "Sprite1")
+
+    assert snapshot["targets"]["Stage"]["dialogue"] == {"style": "say", "text": "ready"}
+    assert snapshot["targets"]["Sprite1"]["dialogue"] == {"style": "think", "text": "hmm"}
+    assert render["stage"]["dialogue"] == {"style": "say", "text": "ready"}
+    assert sprite_render["dialogue"] == {"style": "think", "text": "hmm"}
+
+    for _ in range(3):
+        vm.step(1 / 30)
+
+    assert vm.snapshot()["targets"]["Stage"]["dialogue"] == {"style": "say", "text": "ready"}
+    assert vm.snapshot()["targets"]["Sprite1"]["dialogue"] is None
+
+
+def test_when_backdrop_switches_to_and_switch_backdrop_wait(tmp_path):
+    stage_blocks = {
+        "hat": {"opcode": "event_whenflagclicked", "next": "switch_wait", "parent": None, "inputs": {}, "fields": {}, "topLevel": True},
+        "switch_wait": {
+            "opcode": "looks_switchbackdroptoandwait",
+            "next": "done",
+            "parent": "hat",
+            "inputs": {"BACKDROP": [1, [10, "night"]]},
+            "fields": {},
+            "topLevel": False,
+        },
+        "done": {
+            "opcode": "data_setvariableto",
+            "next": None,
+            "parent": "switch_wait",
+            "inputs": {"VALUE": [1, [4, "1"]]},
+            "fields": {"VARIABLE": ["done", "v2"]},
+            "topLevel": False,
+        },
+    }
+    sprite_blocks = {
+        "hat": {
+            "opcode": "event_whenbackdropswitchesto",
+            "next": "wait",
+            "parent": None,
+            "inputs": {},
+            "fields": {"BACKDROP": ["night", None]},
+            "topLevel": True,
+        },
+        "wait": {
+            "opcode": "control_wait",
+            "next": "set_score",
+            "parent": "hat",
+            "inputs": {"DURATION": [1, [4, "0.1"]]},
+            "fields": {},
+            "topLevel": False,
+        },
+        "set_score": {
+            "opcode": "data_setvariableto",
+            "next": None,
+            "parent": "wait",
+            "inputs": {"VALUE": [1, [4, "7"]]},
+            "fields": {"VARIABLE": ["score", "v1"]},
+            "topLevel": False,
+        },
+    }
+    project = _base_project(blocks_stage=stage_blocks, blocks_sprite=sprite_blocks)
+    project["targets"][0]["costumes"] = [{"name": "day"}, {"name": "night"}]
+    path = tmp_path / "backdrop_wait.sb3"
+    write_sb3(path, project)
+
+    vm = Sb3Vm(load_sb3(path))
+    vm.start_green_flag()
+    vm.step(1 / 30)
+    first = vm.snapshot()
+
+    assert first["targets"]["Stage"]["costume_index"] == 1
+    assert first["stage_variables"]["score"] == 0
+    assert first["stage_variables"]["done"] == 0
+
+    for _ in range(2):
+        vm.step(1 / 30)
+    third = vm.snapshot()
+    assert third["stage_variables"]["done"] == 0
+
+    for _ in range(5):
+        vm.step(1 / 30)
+    final = vm.snapshot()
+
+    assert final["stage_variables"]["score"] == 7.0
+    assert final["stage_variables"]["done"] == 1
 
 
 def test_cli_run_snapshot_includes_input_state_defaults(tmp_path):
@@ -1672,3 +1883,129 @@ def test_motion_reporters_and_glide_to_named_target(tmp_path):
     assert variables["x_seen"] == -30.0
     assert variables["y_seen"] == 45.0
     assert variables["direction_seen"] == 90
+
+
+def test_looks_costume_shadow_switches_costume(tmp_path):
+    sprite_blocks = {
+        "hat": {"opcode": "event_whenflagclicked", "next": "switch", "parent": None, "inputs": {}, "fields": {}, "topLevel": True},
+        "switch": {
+            "opcode": "looks_switchcostumeto",
+            "next": None,
+            "parent": "hat",
+            "inputs": {"COSTUME": [1, "costume_menu"]},
+            "fields": {},
+            "topLevel": False,
+        },
+        "costume_menu": {
+            "opcode": "looks_costume",
+            "next": None,
+            "parent": "switch",
+            "inputs": {},
+            "fields": {"COSTUME": ["two", None]},
+            "topLevel": False,
+        },
+    }
+    project = _base_project(blocks_sprite=sprite_blocks)
+    project["targets"][1]["costumes"] = [{"name": "one"}, {"name": "two"}]
+    path = tmp_path / "looks_costume_menu.sb3"
+    write_sb3(path, project)
+
+    vm = Sb3Vm(load_sb3(path), enable_compilation=True, lazy_compile_threshold=1)
+    vm.run_for(0.2)
+
+    assert vm.snapshot()["targets"]["Sprite1"]["costume_index"] == 1
+
+
+def test_music_note_shadow_waits_for_beats_and_compiles(tmp_path):
+    stage_blocks = {
+        "hat": {"opcode": "event_whenflagclicked", "next": "note_stmt", "parent": None, "inputs": {}, "fields": {}, "topLevel": True},
+        "note_stmt": {
+            "opcode": "music_playNoteForBeats",
+            "next": "done",
+            "parent": "hat",
+            "inputs": {"NOTE": [1, "note_shadow"], "BEATS": [1, [4, "0.25"]]},
+            "fields": {},
+            "topLevel": False,
+        },
+        "note_shadow": {
+            "opcode": "note",
+            "next": None,
+            "parent": "note_stmt",
+            "inputs": {},
+            "fields": {"NOTE": ["36", None]},
+            "topLevel": False,
+        },
+        "done": {
+            "opcode": "data_setvariableto",
+            "next": None,
+            "parent": "note_stmt",
+            "inputs": {"VALUE": [1, [4, "1"]]},
+            "fields": {"VARIABLE": ["done", "v2"]},
+            "topLevel": False,
+        },
+    }
+    project = _base_project(blocks_stage=stage_blocks)
+    project["targets"][0]["tempo"] = 120
+    path = tmp_path / "music_note_wait.sb3"
+    write_sb3(path, project)
+
+    vm = Sb3Vm(load_sb3(path), enable_compilation=True, lazy_compile_threshold=1)
+    vm.start_green_flag()
+    for _ in range(3):
+        vm.step(1 / 30)
+    assert vm.state.stage_variables["done"] == 0
+
+    for _ in range(2):
+        vm.step(1 / 30)
+    assert vm.state.stage_variables["done"] == 1
+
+
+def test_touching_object_mouse_menu_support_and_compiles(tmp_path):
+    sprite_blocks = {
+        "hat": {"opcode": "event_whenflagclicked", "next": "store", "parent": None, "inputs": {}, "fields": {}, "topLevel": True},
+        "store": {
+            "opcode": "data_setvariableto",
+            "next": None,
+            "parent": "hat",
+            "inputs": {"VALUE": [3, "touch_expr"]},
+            "fields": {"VARIABLE": ["touching_mouse", "sv1"]},
+            "topLevel": False,
+        },
+        "touch_expr": {
+            "opcode": "sensing_touchingobject",
+            "next": None,
+            "parent": "store",
+            "inputs": {"TOUCHINGOBJECTMENU": [1, "touch_menu"]},
+            "fields": {},
+            "topLevel": False,
+        },
+        "touch_menu": {
+            "opcode": "sensing_touchingobjectmenu",
+            "next": None,
+            "parent": "touch_expr",
+            "inputs": {},
+            "fields": {"TOUCHINGOBJECTMENU": ["_mouse_", None]},
+            "topLevel": False,
+        },
+    }
+    project = _base_project(blocks_sprite=sprite_blocks)
+    project["targets"][1]["variables"] = {"sv1": ["touching_mouse", 0]}
+    project["targets"][1]["costumes"] = [{"name": "one", "rotationCenterX": 10, "rotationCenterY": 10}]
+    path = tmp_path / "touching_mouse.sb3"
+    write_sb3(path, project)
+
+    provider = HeadlessInputProvider(mouse_x_value=5.0, mouse_y_value=-5.0)
+    vm = Sb3Vm(load_sb3(path), input_provider=provider, enable_compilation=True, lazy_compile_threshold=1)
+    vm.run_for(0.2)
+
+    assert vm.snapshot()["targets"]["Sprite1"]["variables"]["touching_mouse"] is True
+
+
+def test_inspect_test_sb3_has_no_unsupported_scripts():
+    fixture = Path(__file__).resolve().parent.parent / "test.sb3"
+
+    vm = Sb3Vm(load_sb3(fixture))
+    inspect = vm.inspect()
+
+    assert inspect["opcode_coverage"]["unsupported_by_opcode"] == {}
+    assert inspect["unsupported_scripts"] == []

@@ -1,4 +1,6 @@
 """Headless Scratch sb3 VM MVP."""
 
-__all__ = ["__version__"]
-__version__ = "0.1.0"
+from sb3vm.log import TRACE, configure_logging, get_logger
+
+__all__ = ["__version__", "TRACE", "configure_logging", "get_logger"]
+__version__ = "0.2.0"

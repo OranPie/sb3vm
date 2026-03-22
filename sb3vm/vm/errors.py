@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from sb3vm.log import get_logger, instrument_module
+
+
+_LOGGER = get_logger(__name__)
 
 
 class Sb3VmError(Exception):
@@ -42,3 +46,6 @@ class ProjectValidationError(Sb3VmError):
 
 class UnsupportedOpcodeError(Sb3VmError):
     pass
+
+
+instrument_module(globals(), _LOGGER)

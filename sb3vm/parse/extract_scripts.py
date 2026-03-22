@@ -5,12 +5,18 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any
 
+from sb3vm.log import debug, get_logger, info, instrument_module, warn
 from sb3vm.model.project import Project, Target
 from sb3vm.parse.ast_nodes import Expr, ProcedureDefinition, Script, Stmt, Trigger, UnsupportedDiagnostic
 from sb3vm.vm.errors import ProjectValidationError
 
+
+_LOGGER = get_logger(__name__)
+
 SUPPORTED_EVENT_OPS = {
     "event_whenflagclicked",
+    "event_whenkeypressed",
+    "event_whenbackdropswitchesto",
     "event_whenbroadcastreceived",
     "control_start_as_clone",
 }
@@ -46,12 +52,16 @@ SUPPORTED_EXPR_OPS = {
     "sensing_mousex",
     "sensing_mousey",
     "sensing_mousedown",
+    "sensing_touchingobject",
+    "sensing_touchingobjectmenu",
     "motion_xposition",
     "motion_yposition",
     "motion_direction",
     "looks_size",
+    "looks_costume",
     "looks_costumenumbername",
     "looks_backdropnumbername",
+    "note",
     "data_variable",
     "data_itemoflist",
     "data_lengthoflist",
@@ -92,6 +102,10 @@ SUPPORTED_STMT_OPS = {
     "motion_pointtowards",
     "looks_show",
     "looks_hide",
+    "looks_say",
+    "looks_sayforsecs",
+    "looks_think",
+    "looks_thinkforsecs",
     "looks_switchcostumeto",
     "looks_nextcostume",
     "looks_switchbackdropto",
@@ -110,6 +124,7 @@ SUPPORTED_STMT_OPS = {
     "control_delete_this_clone",
     "sensing_askandwait",
     "sensing_resettimer",
+    "music_playNoteForBeats",
 }
 
 
@@ -140,6 +155,7 @@ class ParseResult:
 
 
 def extract_scripts(project: Project) -> ParseResult:
+    info(_LOGGER, "parse.extract_scripts", "extracting scripts for project targets=%d", len(project.targets))
     parser = ProjectParser(project)
     return parser.parse()
 
@@ -154,6 +170,7 @@ class ProjectParser:
         self.diagnostics: list[UnsupportedDiagnostic] = []
 
     def parse(self) -> ParseResult:
+        debug(_LOGGER, "parse.ProjectParser.parse", "collecting procedures and opcodes for %d targets", len(self.project.targets))
         for target in self.project.targets:
             self._collect_opcodes(target)
             self._collect_procedures(target)
@@ -186,6 +203,14 @@ class ProjectParser:
                 if unsupported:
                     script.supported = False
                     script.unsupported_details = unsupported
+                    warn(
+                        _LOGGER,
+                        "parse.ProjectParser.parse",
+                        "script marked unsupported target=%s trigger=%s reason_count=%d",
+                        target.name,
+                        trigger.kind,
+                        len(unsupported),
+                    )
                 scripts.append(script)
 
         procedures = [
@@ -193,7 +218,7 @@ class ProjectParser:
             for target_procedures in self.procedures_by_target.values()
             for proc in target_procedures.values()
         ]
-        return ParseResult(
+        result = ParseResult(
             scripts=scripts,
             procedures=sorted(procedures, key=lambda proc: (proc.target_name, proc.proccode)),
             opcode_histogram=self.opcode_histogram,
@@ -201,6 +226,16 @@ class ProjectParser:
             unsupported_opcode_histogram=self.unsupported_opcode_histogram,
             diagnostics=list(self.diagnostics),
         )
+        info(
+            _LOGGER,
+            "parse.ProjectParser.parse",
+            "parsed scripts=%d procedures=%d unsupported_scripts=%d diagnostics=%d",
+            len(result.scripts),
+            len(result.procedures),
+            len([script for script in result.scripts if not script.supported]),
+            len(result.diagnostics),
+        )
+        return result
 
     def _collect_opcodes(self, target: Target) -> None:
         for block_id, block in target.blocks.items():
@@ -238,6 +273,7 @@ class ProjectParser:
                         block_id=block_id,
                     )
                 )
+                warn(_LOGGER, "parse.ProjectParser._collect_procedures", "unsupported procedure prototype target=%s block=%s", target.name, block_id)
                 continue
             procedures[procedure.proccode] = procedure
         self.procedures_by_target[target.name] = procedures
@@ -293,6 +329,10 @@ class ProjectParser:
         opcode = block.get("opcode")
         if opcode == "event_whenflagclicked":
             return Trigger("green_flag")
+        if opcode == "event_whenkeypressed":
+            return Trigger("key_pressed", self.field_value(block, "KEY_OPTION") or "")
+        if opcode == "event_whenbackdropswitchesto":
+            return Trigger("backdrop_switched", self.field_value(block, "BACKDROP") or "")
         if opcode == "event_whenbroadcastreceived":
             return Trigger("broadcast_received", self.field_value(block, "BROADCAST_OPTION"))
         if opcode == "control_start_as_clone":
@@ -404,14 +444,22 @@ class ProjectParser:
             return Stmt("looks_state", {"mode": "show"})
         if opcode == "looks_hide":
             return Stmt("looks_state", {"mode": "hide"})
+        if opcode == "looks_say":
+            return Stmt("looks_state", {"mode": "dialogue", "style": "say", "message": expr("MESSAGE")})
+        if opcode == "looks_sayforsecs":
+            return Stmt("looks_state", {"mode": "dialogue", "style": "say", "message": expr("MESSAGE"), "duration": expr("SECS")})
+        if opcode == "looks_think":
+            return Stmt("looks_state", {"mode": "dialogue", "style": "think", "message": expr("MESSAGE")})
+        if opcode == "looks_thinkforsecs":
+            return Stmt("looks_state", {"mode": "dialogue", "style": "think", "message": expr("MESSAGE"), "duration": expr("SECS")})
         if opcode == "looks_switchcostumeto":
             return Stmt("looks_state", {"mode": "switch_costume", "costume": expr("COSTUME")})
         if opcode == "looks_nextcostume":
             return Stmt("looks_state", {"mode": "next_costume"})
         if opcode == "looks_switchbackdropto":
-            return Stmt("looks_state", {"mode": "switch_backdrop", "backdrop": expr("BACKDROP")})
+            return Stmt("looks_state", {"mode": "switch_backdrop", "backdrop": expr("BACKDROP"), "wait": False})
         if opcode == "looks_switchbackdroptoandwait":
-            return Stmt("looks_state", {"mode": "switch_backdrop", "backdrop": expr("BACKDROP")})
+            return Stmt("looks_state", {"mode": "switch_backdrop", "backdrop": expr("BACKDROP"), "wait": True})
         if opcode == "looks_nextbackdrop":
             return Stmt("looks_state", {"mode": "next_backdrop"})
         if opcode == "looks_setsizeto":
@@ -438,6 +486,8 @@ class ProjectParser:
             return Stmt("ask", {"prompt": expr("QUESTION")})
         if opcode == "sensing_resettimer":
             return Stmt("reset_timer", {})
+        if opcode == "music_playNoteForBeats":
+            return Stmt("music_play_note", {"note": expr("NOTE"), "beats": expr("BEATS")})
         return Stmt("unsupported", {"opcode": opcode, "block_id": block_id})
 
     def parse_procedure_call(
@@ -494,6 +544,16 @@ class ProjectParser:
             procedure_args=procedure_args,
         )
 
+    def parse_inline_input(self, value: list[Any]) -> Expr:
+        if not value:
+            return Expr("literal", None)
+        tag = value[0]
+        if tag == 12 and len(value) >= 2:
+            return Expr("var", value[1])
+        if tag == 13 and len(value) >= 2:
+            return Expr("list_contents", value[1])
+        return self.parse_literal(value)
+
     def parse_expr(
         self,
         target: Target,
@@ -515,7 +575,7 @@ class ProjectParser:
                 if isinstance(candidate, str) and candidate in target.blocks:
                     return self.parse_expr_from_block(target, candidate, target.blocks[candidate], procedure_args=procedure_args)
                 if isinstance(candidate, list):
-                    return self.parse_literal(candidate)
+                    return self.parse_inline_input(candidate)
                 if candidate is None and len(input_value) >= 3 and isinstance(input_value[2], list):
                     return self.parse_literal(input_value[2])
                 if isinstance(candidate, str):
@@ -567,10 +627,14 @@ class ProjectParser:
             return Expr("list_contains", {"name": self.field_value(block, "LIST"), "item": self.parse_input_expr(target, block_id, block, "ITEM", procedure_args=procedure_args)})
         if opcode == "data_contentsoflist":
             return Expr("list_contents", self.field_value(block, "LIST"))
-        if opcode in {"operator_add", "operator_subtract", "operator_multiply", "operator_divide", "operator_mod", "operator_equals", "operator_lt", "operator_gt"}:
+        if opcode in {"operator_add", "operator_subtract", "operator_multiply", "operator_divide", "operator_mod"}:
             return Expr(opcode, args=[self.parse_input_expr(target, block_id, block, "NUM1", procedure_args=procedure_args), self.parse_input_expr(target, block_id, block, "NUM2", procedure_args=procedure_args)])
-        if opcode in {"operator_and", "operator_or", "operator_join", "operator_contains"}:
+        if opcode in {"operator_equals", "operator_lt", "operator_gt"}:
             return Expr(opcode, args=[self.parse_input_expr(target, block_id, block, "OPERAND1", procedure_args=procedure_args), self.parse_input_expr(target, block_id, block, "OPERAND2", procedure_args=procedure_args)])
+        if opcode in {"operator_and", "operator_or"}:
+            return Expr(opcode, args=[self.parse_input_expr(target, block_id, block, "OPERAND1", procedure_args=procedure_args), self.parse_input_expr(target, block_id, block, "OPERAND2", procedure_args=procedure_args)])
+        if opcode in {"operator_join", "operator_contains"}:
+            return Expr(opcode, args=[self.parse_input_expr(target, block_id, block, "STRING1", procedure_args=procedure_args), self.parse_input_expr(target, block_id, block, "STRING2", procedure_args=procedure_args)])
         if opcode == "operator_not":
             return Expr(opcode, args=[self.parse_input_expr(target, block_id, block, "OPERAND", procedure_args=procedure_args)])
         if opcode == "operator_random":
@@ -597,6 +661,10 @@ class ProjectParser:
             return Expr("mouse_y")
         if opcode == "sensing_mousedown":
             return Expr("mouse_down")
+        if opcode == "sensing_touchingobject":
+            return Expr("touching_object", args=[self.parse_input_expr(target, block_id, block, "TOUCHINGOBJECTMENU", procedure_args=procedure_args)])
+        if opcode == "sensing_touchingobjectmenu":
+            return Expr("literal", self.field_value(block, "TOUCHINGOBJECTMENU") or "")
         if opcode == "motion_xposition":
             return Expr("x_position")
         if opcode == "motion_yposition":
@@ -605,10 +673,15 @@ class ProjectParser:
             return Expr("direction")
         if opcode == "looks_size":
             return Expr("size")
+        if opcode == "looks_costume":
+            return Expr("literal", self.field_value(block, "COSTUME") or "")
         if opcode == "looks_costumenumbername":
             return Expr("costume_info", self.field_value(block, "NUMBER_NAME") or "number")
         if opcode == "looks_backdropnumbername":
             return Expr("backdrop_info", self.field_value(block, "NUMBER_NAME") or "number")
+        if opcode == "note":
+            value = self.field_value(block, "NOTE")
+            return self.parse_literal([0, value]) if value is not None else Expr("literal", 60)
         if opcode == "control_create_clone_of_menu":
             return Expr("literal", self.field_value(block, "CLONE_OPTION") or "")
         if opcode in ARG_REPORTER_OPS:
@@ -794,3 +867,6 @@ class ProjectParser:
         if isinstance(raw, bool):
             return raw
         return str(raw).lower() == "true"
+
+
+instrument_module(globals(), _LOGGER)

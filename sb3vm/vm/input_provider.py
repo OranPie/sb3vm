@@ -3,6 +3,10 @@ from __future__ import annotations
 import random
 from dataclasses import dataclass, field
 from typing import Protocol
+from sb3vm.log import get_logger, instrument_module
+
+
+_LOGGER = get_logger(__name__)
 
 
 def normalize_key_name(value: str) -> str:
@@ -21,6 +25,7 @@ def normalize_key_name(value: str) -> str:
 
 class InputProvider(Protocol):
     def key_pressed(self, key_name: str) -> bool: ...
+    def active_keys(self) -> set[str]: ...
     def mouse_x(self) -> float: ...
     def mouse_y(self) -> float: ...
     def mouse_down(self) -> bool: ...
@@ -42,7 +47,10 @@ class HeadlessInputProvider:
     timer_override_value: float | None = None
 
     def key_pressed(self, key_name: str) -> bool:
-        return normalize_key_name(key_name) in self.pressed_keys
+        return normalize_key_name(key_name) in self.active_keys()
+
+    def active_keys(self) -> set[str]:
+        return {normalize_key_name(key) for key in self.pressed_keys}
 
     def mouse_x(self) -> float:
         return self.mouse_x_value
@@ -73,7 +81,7 @@ class HeadlessInputProvider:
         return {
             "answer": self.answer_value,
             "pending_answers": len(self.answers),
-            "pressed_keys": sorted(self.pressed_keys),
+            "pressed_keys": sorted(self.active_keys()),
             "mouse_x": self.mouse_x_value,
             "mouse_y": self.mouse_y_value,
             "mouse_down": self.mouse_down_value,
@@ -96,3 +104,6 @@ class VmRng:
 
     def randrange(self, stop: int) -> int:
         return self._random.randrange(stop)
+
+
+instrument_module(globals(), _LOGGER)

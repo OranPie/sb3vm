@@ -74,6 +74,22 @@
       }
     },
     {
+      "id": "key_backdrop_dialogue",
+      "kind": "real_project",
+      "path": "projects/key_backdrop_dialogue.sb3",
+      "expected_label": "fully_supported",
+      "runtime": {
+        "steps": 6,
+        "dt": 0.03333333333333333,
+        "pressed_keys": [
+          "space"
+        ]
+      },
+      "expect": {
+        "final_snapshot": "goldens/key_backdrop_dialogue_final.json"
+      }
+    },
+    {
       "id": "invalid_archive",
       "kind": "real_project",
       "path": "projects/invalid_archive.sb3",

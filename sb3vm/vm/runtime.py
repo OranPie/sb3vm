@@ -1,18 +1,25 @@
 from __future__ import annotations
 
 import math
+import re
+import struct
 from dataclasses import dataclass, replace
 from typing import Any
 
+from sb3vm.log import debug, get_logger, info, instrument_module, warn
 from sb3vm.model.project import Project
 from sb3vm.parse.ast_nodes import AskState, RuntimeDiagnostic, Script, Stmt
 from sb3vm.parse.extract_scripts import extract_scripts
+from sb3vm.parse.pretty import summarize_stmt
 from sb3vm.vm.compiler import CompiledScript, compile_script
 from sb3vm.vm.eval_expr import eval_expr
-from sb3vm.vm.input_provider import HeadlessInputProvider, InputProvider, VmRng
+from sb3vm.vm.input_provider import HeadlessInputProvider, InputProvider, VmRng, normalize_key_name
 from sb3vm.vm.ir import IrScript, lower_script
 from sb3vm.vm.scratch_values import compare_equal, compare_order, letter_of, resolve_insert_index, resolve_list_index, to_bool, to_number
 from sb3vm.vm.state import FrameState, LoopState, ThreadState, VMState
+
+
+_LOGGER = get_logger(__name__)
 
 
 @dataclass
@@ -59,6 +66,12 @@ class Sb3Vm:
             for procedure in self.parsed.procedures
         }
         self.opcode_histogram = self.parsed.opcode_histogram
+        self._green_flag_scripts: tuple[Script, ...] = ()
+        self._broadcast_scripts: dict[str, tuple[Script, ...]] = {}
+        self._backdrop_scripts: dict[str, tuple[Script, ...]] = {}
+        self._clone_start_scripts: dict[str, tuple[Script, ...]] = {}
+        self._key_scripts: dict[str, tuple[Script, ...]] = {}
+        self._any_key_scripts: tuple[Script, ...] = ()
         self.ir_scripts: dict[str, IrScript] = {
             f"{index}:{script.target_name}:{script.trigger.kind}:{script.trigger.value or ''}": lower_script(
                 script,
@@ -76,7 +89,66 @@ class Sb3Vm:
         self._next_thread_id = 1
         self._next_spawn_order = 1
         self._next_instance_id = max(self.state.instances, default=0) + 1
+        self._next_dialogue_token = 1
+        self._last_pressed_keys: set[str] = set()
         self._pending_instance_deletions: set[int] = set()
+        self._costume_size_cache: dict[tuple[str, int], tuple[float, float]] = {}
+        self._index_scripts()
+        info(
+            _LOGGER,
+            "vm.Sb3Vm.__init__",
+            "initialized vm targets=%d scripts=%d procedures=%d compiled=%s lazy_threshold=%s",
+            len(self.project.targets),
+            len(self.scripts),
+            len(self.procedures),
+            self.config.enable_compilation,
+            self.config.lazy_compile_threshold,
+        )
+
+    def _index_scripts(self) -> None:
+        green_flag_scripts: list[Script] = []
+        broadcast_scripts: dict[str, list[Script]] = {}
+        backdrop_scripts: dict[str, list[Script]] = {}
+        clone_start_scripts: dict[str, list[Script]] = {}
+        key_scripts: dict[str, list[Script]] = {}
+        any_key_scripts: list[Script] = []
+        for script in self.scripts:
+            trigger = script.trigger
+            if trigger.kind == "green_flag":
+                green_flag_scripts.append(script)
+                continue
+            if trigger.kind == "broadcast_received":
+                broadcast_scripts.setdefault(trigger.value or "", []).append(script)
+                continue
+            if trigger.kind == "backdrop_switched":
+                backdrop_scripts.setdefault(trigger.value or "", []).append(script)
+                continue
+            if trigger.kind == "clone_start":
+                clone_start_scripts.setdefault(script.target_name, []).append(script)
+                continue
+            if trigger.kind == "key_pressed":
+                normalized = normalize_key_name(trigger.value or "")
+                if normalized == "any":
+                    any_key_scripts.append(script)
+                else:
+                    key_scripts.setdefault(normalized, []).append(script)
+        self._green_flag_scripts = tuple(green_flag_scripts)
+        self._broadcast_scripts = {name: tuple(scripts) for name, scripts in broadcast_scripts.items()}
+        self._backdrop_scripts = {name: tuple(scripts) for name, scripts in backdrop_scripts.items()}
+        self._clone_start_scripts = {name: tuple(scripts) for name, scripts in clone_start_scripts.items()}
+        self._key_scripts = {name: tuple(scripts) for name, scripts in key_scripts.items()}
+        self._any_key_scripts = tuple(any_key_scripts)
+        debug(
+            _LOGGER,
+            "vm.Sb3Vm._index_scripts",
+            "indexed green=%d broadcasts=%d backdrops=%d clone_targets=%d key_bindings=%d any_key=%d",
+            len(self._green_flag_scripts),
+            len(self._broadcast_scripts),
+            len(self._backdrop_scripts),
+            len(self._clone_start_scripts),
+            len(self._key_scripts),
+            len(self._any_key_scripts),
+        )
 
     def timer_seconds(self) -> float:
         return self.state.timer_seconds(self.input_provider.timer_override(self.state.time_seconds))
@@ -87,7 +159,73 @@ class Sb3Vm:
     def snapshot(self) -> dict[str, Any]:
         provider_state = self.input_provider.snapshot()
         provider_state["timer_seconds"] = self.timer_seconds()
-        return self.state.snapshot(input_state=provider_state, random_seed=self.config.random_seed)
+        snapshot = self.state.snapshot(input_state=provider_state, random_seed=self.config.random_seed)
+        thread_status = self.thread_statuses()
+        snapshot["thread_status"] = thread_status
+        for item in thread_status:
+            thread_id = str(item["thread_id"])
+            if thread_id in snapshot["thread_frames"]:
+                snapshot["thread_frames"][thread_id]["current_statement"] = item["current_statement"]
+                snapshot["thread_frames"][thread_id]["wait_state"] = item["wait_state"]
+                snapshot["thread_frames"][thread_id]["wait_detail"] = item["wait_detail"]
+        return snapshot
+
+    def thread_statuses(self) -> list[dict[str, Any]]:
+        statuses: list[dict[str, Any]] = []
+        for thread in sorted(self.state.threads.values(), key=lambda item: item.spawn_order):
+            if thread.done:
+                continue
+            instance = self.state.instances.get(thread.instance_id)
+            statuses.append(
+                {
+                    "thread_id": thread.id,
+                    "instance_id": thread.instance_id,
+                    "target_name": instance.source_target_name if instance is not None else thread.root_target_name,
+                    "root_trigger": thread.root_trigger,
+                    "engine": thread.engine,
+                    "frame_kind": thread.frames[-1].kind if thread.frames else None,
+                    "call_depth": thread.call_depth(),
+                    "current_statement": self._thread_current_statement(thread),
+                    "wait_state": self._thread_wait_state(thread),
+                    "wait_detail": self._thread_wait_detail(thread),
+                }
+            )
+        return statuses
+
+    def _thread_current_statement(self, thread: ThreadState) -> str | None:
+        if thread.compiled_runner is not None:
+            return "<compiled>"
+        if self._thread_wait_state(thread) is not None and thread.current_stmt is not None:
+            return summarize_stmt(thread.current_stmt)
+        for frame in reversed(thread.frames):
+            if frame.index < len(frame.stmts):
+                stmt = frame.stmts[frame.index]
+                return summarize_stmt(stmt)
+        if thread.current_stmt is not None:
+            return summarize_stmt(thread.current_stmt)
+        return None
+
+    def _thread_wait_state(self, thread: ThreadState) -> str | None:
+        if thread.waiting_for_answer is not None:
+            return "answer"
+        if thread.waiting_for_children:
+            return "children"
+        if thread.glide is not None:
+            return "glide"
+        if thread.wake_time > self.state.time_seconds:
+            return "sleep"
+        return None
+
+    def _thread_wait_detail(self, thread: ThreadState) -> str | None:
+        if thread.waiting_for_answer is not None:
+            return thread.waiting_for_answer.prompt
+        if thread.waiting_for_children:
+            return thread.wait_reason
+        if thread.glide is not None:
+            return f"until {thread.glide['to_x']:.1f},{thread.glide['to_y']:.1f}"
+        if thread.wake_time > self.state.time_seconds:
+            return f"until {thread.wake_time:.3f}s"
+        return None
 
     def render_snapshot(self) -> dict[str, Any]:
         return self.state.render_snapshot(self.project)
@@ -120,41 +258,69 @@ class Sb3Vm:
         }
 
     def run_for(self, seconds: float, dt: float = 1 / 30) -> RunResult:
+        info(_LOGGER, "vm.Sb3Vm.run_for", "running for %.3fs dt=%.5f", seconds, dt)
         self.start_green_flag()
         steps = max(0, int(seconds / dt))
         for _ in range(steps):
             self.step(dt)
+        info(_LOGGER, "vm.Sb3Vm.run_for", "run finished time=%.3f remaining_threads=%d", self.state.time_seconds, len(self.state.threads))
         return RunResult(self.state, self.scripts)
 
     def start_green_flag(self) -> None:
-        for script in self.scripts:
-            if script.trigger.kind != "green_flag":
-                continue
+        info(_LOGGER, "vm.Sb3Vm.start_green_flag", "starting %d green-flag scripts", len(self._green_flag_scripts))
+        for script in self._green_flag_scripts:
             if not script.supported:
+                warn(_LOGGER, "vm.Sb3Vm.start_green_flag", "skipping unsupported green-flag script target=%s", script.target_name)
                 self.state.unsupported_scripts.extend(script.unsupported_details)
                 continue
             self._spawn_for_matching_instances(script, include_clones=False)
 
     def emit_broadcast(self, name: str, wait_parent: ThreadState | None = None) -> set[int]:
+        info(_LOGGER, "vm.Sb3Vm.emit_broadcast", "broadcast=%s wait=%s", name, wait_parent is not None)
         child_ids: set[int] = set()
-        for script in self.scripts:
-            if script.trigger.kind != "broadcast_received" or script.trigger.value != name:
-                continue
+        for script in self._broadcast_scripts.get(name, ()):
             if not script.supported:
+                warn(_LOGGER, "vm.Sb3Vm.emit_broadcast", "skipping unsupported broadcast script target=%s name=%s", script.target_name, name)
                 self.state.unsupported_scripts.extend(script.unsupported_details)
                 continue
             child_ids |= self._spawn_for_matching_instances(script, include_clones=True)
         if wait_parent is not None:
             wait_parent.waiting_for_children |= child_ids
             wait_parent.wait_reason = f"broadcast:{name}"
+        debug(_LOGGER, "vm.Sb3Vm.emit_broadcast", "broadcast=%s spawned_children=%d", name, len(child_ids))
+        return child_ids
+
+    def emit_key_press(self, key_name: str) -> set[int]:
+        normalized_key = normalize_key_name(key_name)
+        child_ids: set[int] = set()
+        for script in self._key_scripts.get(normalized_key, ()):
+            if not script.supported:
+                self.state.unsupported_scripts.extend(script.unsupported_details)
+                continue
+            child_ids |= self._spawn_for_matching_instances(script, include_clones=True)
+        for script in self._any_key_scripts:
+            if not script.supported:
+                self.state.unsupported_scripts.extend(script.unsupported_details)
+                continue
+            child_ids |= self._spawn_for_matching_instances(script, include_clones=True)
+        return child_ids
+
+    def emit_backdrop_switch(self, name: str, wait_parent: ThreadState | None = None) -> set[int]:
+        child_ids: set[int] = set()
+        for script in self._backdrop_scripts.get(name, ()):
+            if not script.supported:
+                self.state.unsupported_scripts.extend(script.unsupported_details)
+                continue
+            child_ids |= self._spawn_for_matching_instances(script, include_clones=True)
+        if wait_parent is not None:
+            wait_parent.waiting_for_children |= child_ids
+            wait_parent.wait_reason = f"backdrop:{name}"
         return child_ids
 
     def _spawn_clone_start(self, instance_id: int) -> set[int]:
         child_ids: set[int] = set()
         source_target_name = self.state.get_instance(instance_id).source_target_name
-        for script in self.scripts:
-            if script.target_name != source_target_name or script.trigger.kind != "clone_start":
-                continue
+        for script in self._clone_start_scripts.get(source_target_name, ()):
             if not script.supported:
                 self.state.unsupported_scripts.extend(script.unsupported_details)
                 continue
@@ -190,18 +356,29 @@ class Sb3Vm:
             thread.compiled_runner = compiled.generator_factory(self, thread)
         self._next_spawn_order += 1
         self.state.threads[tid] = thread
+        debug(
+            _LOGGER,
+            "vm.Sb3Vm._spawn_script",
+            "spawned thread id=%d instance=%d target=%s trigger=%s engine=%s",
+            tid,
+            instance_id,
+            script.target_name,
+            script.trigger.kind,
+            thread.engine,
+        )
         return thread
 
     def step(self, dt: float) -> None:
         self.state.time_seconds += dt
-        active_ids = sorted(self.state.threads, key=lambda tid: self.state.threads[tid].spawn_order)
-        for thread_id in active_ids:
-            thread = self.state.threads.get(thread_id)
-            if thread is None or thread.done:
+        self._poll_input_events()
+        threads = self.state.threads
+        for thread in tuple(threads.values()):
+            if thread.done:
                 continue
             if thread.instance_id in self._pending_instance_deletions:
                 thread.done = True
                 continue
+            self._clear_dialogue_if_ready(thread)
             if thread.waiting_for_answer is not None:
                 answer = self.input_provider.pop_answer()
                 if answer is None:
@@ -209,7 +386,7 @@ class Sb3Vm:
                 self.input_provider.set_answer(answer)
                 thread.waiting_for_answer = None
             if thread.waiting_for_children:
-                alive = {tid for tid in thread.waiting_for_children if tid in self.state.threads and not self.state.threads[tid].done}
+                alive = {tid for tid in thread.waiting_for_children if tid in threads and not threads[tid].done}
                 thread.waiting_for_children = alive
                 if alive:
                     continue
@@ -223,8 +400,8 @@ class Sb3Vm:
                 self._advance_compiled_thread(thread)
                 continue
             self._advance_thread(thread)
-        for tid in [tid for tid, thread in self.state.threads.items() if thread.done]:
-            self.state.threads.pop(tid, None)
+        for tid in [tid for tid, thread in threads.items() if thread.done]:
+            threads.pop(tid, None)
         for instance_id in list(self._pending_instance_deletions):
             self.state.instances.pop(instance_id, None)
             self._pending_instance_deletions.discard(instance_id)
@@ -276,6 +453,7 @@ class Sb3Vm:
 
             stmt = frame.stmts[frame.index]
             frame.index += 1
+            thread.current_stmt = stmt
             action = self._execute_stmt(thread, stmt)
             if action == "yield":
                 return
@@ -288,6 +466,7 @@ class Sb3Vm:
     def _advance_compiled_thread(self, thread: ThreadState) -> None:
         if thread.compiled_runner is None:
             return
+        thread.current_stmt = None
         try:
             action = next(thread.compiled_runner)
         except StopIteration:
@@ -334,6 +513,10 @@ class Sb3Vm:
             return None
         if kind == "wait":
             thread.wake_time = self.state.time_seconds + max(0.0, to_number(eval_expr(stmt.args["duration"], self.state, thread, self)))
+            return "block"
+        if kind == "music_play_note":
+            eval_expr(stmt.args["note"], self.state, thread, self)
+            thread.wake_time = self.state.time_seconds + self._beats_to_seconds(eval_expr(stmt.args["beats"], self.state, thread, self))
             return "block"
         if kind == "repeat":
             times = int(to_number(eval_expr(stmt.args["times"], self.state, thread, self)))
@@ -420,6 +603,7 @@ class Sb3Vm:
         source_target_name = self.state.get_instance(thread.instance_id).source_target_name
         procedure = self.procedures.get((source_target_name, proccode))
         if procedure is None:
+            warn(_LOGGER, "vm.Sb3Vm._call_procedure", "missing procedure target=%s proccode=%s", source_target_name, proccode)
             self.state.runtime_diagnostics.append(
                 RuntimeDiagnostic(
                     kind="missing_procedure",
@@ -434,6 +618,7 @@ class Sb3Vm:
             return "block"
 
         if thread.call_depth() + 1 > self.config.max_call_depth:
+            warn(_LOGGER, "vm.Sb3Vm._call_procedure", "recursion limit hit target=%s proccode=%s depth=%d", source_target_name, proccode, thread.call_depth() + 1)
             self.state.runtime_diagnostics.append(
                 RuntimeDiagnostic(
                     kind="recursion_limit",
@@ -467,26 +652,29 @@ class Sb3Vm:
 
     def _create_clone(self, thread: ThreadState, selector: str) -> None:
         source_instance = self.state.get_instance(thread.instance_id)
-        if selector == "myself":
+        token = str(selector).strip()
+        if token.lower() in {"myself", "_myself_"}:
             base_instance = source_instance
         else:
-            if selector not in self.state.original_instance_ids:
+            if token not in self.state.original_instance_ids:
+                warn(_LOGGER, "vm.Sb3Vm._create_clone", "invalid clone target=%s source=%s", token, source_instance.source_target_name)
                 self.state.runtime_diagnostics.append(
                     RuntimeDiagnostic(
                         kind="invalid_clone_target",
-                        message=f"Unknown clone target: {selector}",
+                        message=f"Unknown clone target: {token}",
                         target_name=source_instance.source_target_name,
                         thread_id=thread.id,
                         instance_id=thread.instance_id,
                     )
                 )
                 return
-            base_instance = self.state.get_instance(self.state.get_original_instance_id(selector))
+            base_instance = self.state.get_instance(self.state.get_original_instance_id(token))
         if base_instance.is_stage:
+            warn(_LOGGER, "vm.Sb3Vm._create_clone", "attempted to clone stage target=%s", token or base_instance.source_target_name)
             self.state.runtime_diagnostics.append(
                 RuntimeDiagnostic(
                     kind="invalid_clone_target",
-                    message=f"Cannot clone target: {selector or base_instance.source_target_name}",
+                    message=f"Cannot clone target: {token or base_instance.source_target_name}",
                     target_name=source_instance.source_target_name,
                     thread_id=thread.id,
                     instance_id=thread.instance_id,
@@ -494,6 +682,7 @@ class Sb3Vm:
             )
             return
         if self.state.live_clone_count() >= self.config.max_clones:
+            warn(_LOGGER, "vm.Sb3Vm._create_clone", "clone limit reached target=%s limit=%d", base_instance.source_target_name, self.config.max_clones)
             self.state.runtime_diagnostics.append(
                 RuntimeDiagnostic(
                     kind="clone_limit",
@@ -515,10 +704,12 @@ class Sb3Vm:
         self.state.instances[self._next_instance_id] = new_instance
         self._next_instance_id += 1
         self._spawn_clone_start(new_instance.instance_id)
+        info(_LOGGER, "vm.Sb3Vm._create_clone", "created clone instance=%d source=%s", new_instance.instance_id, new_instance.source_target_name)
 
     def _delete_clone(self, thread: ThreadState) -> str:
         instance = self.state.get_instance(thread.instance_id)
         if not instance.is_clone:
+            warn(_LOGGER, "vm.Sb3Vm._delete_clone", "delete_this_clone called on non-clone target=%s", instance.source_target_name)
             self.state.runtime_diagnostics.append(
                 RuntimeDiagnostic(
                     kind="delete_non_clone",
@@ -622,6 +813,129 @@ class Sb3Vm:
             return 10 ** value
         return value
 
+    def _stage_tempo(self) -> float:
+        try:
+            tempo = float(self.project.get_target("Stage").tempo)
+        except (KeyError, TypeError, ValueError):
+            return 60.0
+        return tempo if tempo > 0 else 60.0
+
+    def _beats_to_seconds(self, beats: Any) -> float:
+        return max(0.0, to_number(beats)) * 60.0 / self._stage_tempo()
+
+    def touching_object(self, instance_id: int, selector: Any) -> bool:
+        instance = self.state.get_instance(instance_id)
+        if instance.is_stage:
+            return False
+        bounds = self._instance_bounds(instance)
+        if bounds is None:
+            return False
+        token = str(selector).strip()
+        lowered = token.lower()
+        if lowered == "_mouse_":
+            return self._bounds_contains_point(bounds, self.input_provider.mouse_x(), self.input_provider.mouse_y())
+        if lowered == "_edge_":
+            left, bottom, right, top = bounds
+            return left <= -240.0 or right >= 240.0 or bottom <= -180.0 or top >= 180.0
+        for other in self.state.instances.values():
+            if other.instance_id == instance.instance_id or other.source_target_name != token:
+                continue
+            other_bounds = self._instance_bounds(other)
+            if other_bounds is not None and self._bounds_overlap(bounds, other_bounds):
+                return True
+        return False
+
+    def _instance_bounds(self, instance: Any) -> tuple[float, float, float, float] | None:
+        if not instance.visible and not instance.is_stage:
+            return None
+        width, height = self._costume_dimensions(instance.source_target_name, instance.costume_index)
+        if width <= 0 or height <= 0:
+            return None
+        half_width = width * max(0.0, instance.size) / 200.0
+        half_height = height * max(0.0, instance.size) / 200.0
+        return (instance.x - half_width, instance.y - half_height, instance.x + half_width, instance.y + half_height)
+
+    def _costume_dimensions(self, target_name: str, costume_index: int) -> tuple[float, float]:
+        costumes = self._target_costumes(target_name)
+        if not costumes:
+            return (0.0, 0.0)
+        resolved_index = costume_index % len(costumes)
+        cache_key = (target_name, resolved_index)
+        cached = self._costume_size_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        dims = self._read_costume_dimensions(costumes[resolved_index])
+        self._costume_size_cache[cache_key] = dims
+        return dims
+
+    def _read_costume_dimensions(self, costume: dict[str, Any]) -> tuple[float, float]:
+        asset_name = str(costume.get("md5ext") or "")
+        if not asset_name:
+            asset_id = costume.get("assetId")
+            data_format = costume.get("dataFormat")
+            if asset_id and data_format:
+                asset_name = f"{asset_id}.{data_format}"
+        payload = self.project.assets.get(asset_name) if asset_name else None
+        if payload:
+            suffix = asset_name.rsplit(".", 1)[-1].lower() if "." in asset_name else str(costume.get("dataFormat", "")).lower()
+            if suffix == "svg":
+                dims = self._parse_svg_dimensions(payload)
+                if dims is not None:
+                    return dims
+            if suffix == "png":
+                dims = self._parse_png_dimensions(payload)
+                if dims is not None:
+                    return dims
+        fallback_width = max(0.0, float(costume.get("rotationCenterX", 0.0)) * 2.0)
+        fallback_height = max(0.0, float(costume.get("rotationCenterY", 0.0)) * 2.0)
+        return (fallback_width, fallback_height)
+
+    def _parse_svg_dimensions(self, payload: bytes) -> tuple[float, float] | None:
+        text = payload.decode("utf-8", errors="ignore")
+        width = self._parse_svg_length(self._match_svg_attr(text, "width"))
+        height = self._parse_svg_length(self._match_svg_attr(text, "height"))
+        if width > 0 and height > 0:
+            return (width, height)
+        view_box = self._match_svg_attr(text, "viewBox")
+        if view_box:
+            numbers = [self._parse_svg_length(part) for part in re.split(r"[\s,]+", view_box.strip()) if part]
+            if len(numbers) == 4 and numbers[2] > 0 and numbers[3] > 0:
+                return (numbers[2], numbers[3])
+        return None
+
+    def _match_svg_attr(self, text: str, name: str) -> str | None:
+        match = re.search(rf'\b{name}\s*=\s*["\']([^"\']+)["\']', text)
+        if match is None:
+            return None
+        return match.group(1)
+
+    def _parse_svg_length(self, raw: str | None) -> float:
+        if not raw:
+            return 0.0
+        match = re.search(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)", raw)
+        if match is None:
+            return 0.0
+        return abs(float(match.group(0)))
+
+    def _parse_png_dimensions(self, payload: bytes) -> tuple[float, float] | None:
+        if len(payload) < 24 or payload[:8] != b"\x89PNG\r\n\x1a\n" or payload[12:16] != b"IHDR":
+            return None
+        width, height = struct.unpack(">II", payload[16:24])
+        return (float(width), float(height))
+
+    def _bounds_contains_point(self, bounds: tuple[float, float, float, float], x: float, y: float) -> bool:
+        left, bottom, right, top = bounds
+        return left <= x <= right and bottom <= y <= top
+
+    def _bounds_overlap(
+        self,
+        first: tuple[float, float, float, float],
+        second: tuple[float, float, float, float],
+    ) -> bool:
+        left_a, bottom_a, right_a, top_a = first
+        left_b, bottom_b, right_b, top_b = second
+        return left_a <= right_b and right_a >= left_b and bottom_a <= top_b and top_a >= bottom_b
+
     def _resolve_target_position(self, selector: Any, instance: Any) -> tuple[float, float]:
         text = str(selector).strip()
         lowered = text.lower()
@@ -680,8 +994,21 @@ class Sb3Vm:
             self._switch_costume(instance, values["costume"])
         elif mode == "next_costume":
             self._advance_costume(instance, 1)
+        elif mode == "dialogue":
+            message = str(values["message"])
+            duration = values.get("duration")
+            if duration is None:
+                self._set_dialogue(instance, str(values["style"]), message)
+            else:
+                token = self._set_dialogue(instance, str(values["style"]), message)
+                thread.dialogue_clear_instance_id = instance.instance_id
+                thread.dialogue_clear_token = token
+                thread.wake_time = self.state.time_seconds + max(0.0, to_number(duration))
+                return "block"
         elif mode == "switch_backdrop":
-            self._switch_backdrop(values["backdrop"])
+            child_ids = self._switch_backdrop(values["backdrop"], wait_parent=thread if values.get("wait") else None)
+            if values.get("wait") and child_ids:
+                return "block"
         elif mode == "next_backdrop":
             self._advance_backdrop(1)
         elif mode == "set_size":
@@ -777,15 +1104,58 @@ class Sb3Vm:
         if costumes:
             instance.costume_index = (instance.costume_index + delta) % len(costumes)
 
-    def _switch_backdrop(self, value: Any) -> None:
+    def _set_dialogue(self, instance: Any, style: str, message: str) -> int:
+        token = self._next_dialogue_token
+        self._next_dialogue_token += 1
+        instance.dialogue = {"style": style, "text": message}
+        instance.dialogue_token = token
+        return token
+
+    def _clear_dialogue_if_ready(self, thread: ThreadState) -> None:
+        if thread.dialogue_clear_token is None or thread.dialogue_clear_instance_id is None:
+            return
+        if thread.wake_time > self.state.time_seconds:
+            return
+        instance = self.state.instances.get(thread.dialogue_clear_instance_id)
+        if instance is not None and instance.dialogue_token == thread.dialogue_clear_token:
+            instance.dialogue = None
+        thread.dialogue_clear_instance_id = None
+        thread.dialogue_clear_token = None
+
+    def _backdrop_name(self) -> str:
+        stage = self._stage_instance()
+        costumes = self._target_costumes(stage.source_target_name)
+        if not costumes:
+            return ""
+        return str(costumes[stage.costume_index % len(costumes)].get("name", ""))
+
+    def _switch_backdrop(self, value: Any, wait_parent: ThreadState | None = None) -> set[int]:
         stage = self._stage_instance()
         index = self._resolve_costume_index(stage.source_target_name, value)
-        if index is not None:
-            stage.costume_index = index
+        if index is None:
+            return set()
+        if stage.costume_index == index:
+            return set()
+        stage.costume_index = index
+        return self.emit_backdrop_switch(self._backdrop_name(), wait_parent=wait_parent)
 
-    def _advance_backdrop(self, delta: int) -> None:
+    def _advance_backdrop(self, delta: int, wait_parent: ThreadState | None = None) -> set[int]:
         stage = self._stage_instance()
-        self._advance_costume(stage, delta)
+        costumes = self._target_costumes(stage.source_target_name)
+        if not costumes:
+            return set()
+        next_index = (stage.costume_index + delta) % len(costumes)
+        if next_index == stage.costume_index:
+            return set()
+        stage.costume_index = next_index
+        return self.emit_backdrop_switch(self._backdrop_name(), wait_parent=wait_parent)
+
+    def _poll_input_events(self) -> None:
+        current_keys = {normalize_key_name(key) for key in self.input_provider.active_keys()}
+        new_keys = sorted(current_keys - self._last_pressed_keys)
+        for key_name in new_keys:
+            self.emit_key_press(key_name)
+        self._last_pressed_keys = current_keys
 
     def _reindex_layers(self, ordered_instances: list[Any]) -> None:
         for index, current in enumerate(ordered_instances):
@@ -814,3 +1184,6 @@ class Sb3Vm:
         new_index = min(max(current_index + delta, 0), len(ordered))
         ordered.insert(new_index, instance)
         self._reindex_layers(ordered)
+
+
+instrument_module(globals(), _LOGGER)

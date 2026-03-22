@@ -24,7 +24,7 @@ def test_compare_subset_reports_nested_mismatch() -> None:
 def test_default_compat_manifest_runs_cleanly() -> None:
     report = run_compat_suite(manifest_path=default_manifest_path())
 
-    assert report["summary"]["label_counts"][FULLY_SUPPORTED] == 2
+    assert report["summary"]["label_counts"][FULLY_SUPPORTED] == 3
     assert report["summary"]["label_counts"][PARTIALLY_SUPPORTED] == 1
     assert report["summary"]["label_counts"][PARSED_ONLY] == 1
     assert report["summary"]["label_counts"][UNSUPPORTED] == 1
@@ -36,6 +36,7 @@ def test_default_compat_manifest_runs_cleanly() -> None:
     assert fixture_ids["parsed_only"]["label"] == PARSED_ONLY
     assert fixture_ids["invalid_archive"]["label"] == UNSUPPORTED
     assert fixture_ids["timing_broadcast_wait"]["checkpoint_results"][0]["mismatches"] == []
+    assert fixture_ids["key_backdrop_dialogue"]["label"] == FULLY_SUPPORTED
     assert report["opcode_matrix"]["data_changevariableby"]["seen_count"] >= 2
 
 

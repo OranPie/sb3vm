@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from sb3vm.log import get_logger, instrument_module
 from sb3vm.parse.ast_nodes import Expr
 from sb3vm.vm.input_provider import normalize_key_name
 from sb3vm.vm.scratch_values import (
@@ -17,6 +18,9 @@ from sb3vm.vm.scratch_values import (
     to_string,
 )
 from sb3vm.vm.state import ThreadState, VMState
+
+
+_LOGGER = get_logger(__name__)
 
 
 def eval_expr(expr: Expr, vm_state: VMState, thread: ThreadState, vm: Any) -> Any:
@@ -39,6 +43,8 @@ def eval_expr(expr: Expr, vm_state: VMState, thread: ThreadState, vm: Any) -> An
         return vm.input_provider.mouse_y()
     if kind == "mouse_down":
         return vm.input_provider.mouse_down()
+    if kind == "touching_object":
+        return vm.touching_object(thread.instance_id, eval_expr(expr.args[0], vm_state, thread, vm))
     if kind == "x_position":
         return target.x
     if kind == "y_position":
@@ -154,3 +160,6 @@ def eval_expr(expr: Expr, vm_state: VMState, thread: ThreadState, vm: Any) -> An
         if op == "10 ^":
             return 10 ** value
     raise ValueError(f"Unsupported expression kind: {kind}")
+
+
+instrument_module(globals(), _LOGGER)

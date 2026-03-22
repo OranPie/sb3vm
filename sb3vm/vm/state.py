@@ -5,6 +5,10 @@ from typing import Any
 
 from sb3vm.model.project import Project
 from sb3vm.parse.ast_nodes import AskState, RuntimeDiagnostic, UnsupportedDiagnostic
+from sb3vm.log import get_logger, instrument_module
+
+
+_LOGGER = get_logger(__name__)
 
 
 @dataclass
@@ -20,6 +24,8 @@ class TargetState:
     costume_index: int = 0
     layer_order: int = 0
     effects: dict[str, float] = field(default_factory=dict)
+    dialogue: dict[str, Any] | None = None
+    dialogue_token: int = 0
     local_variables: dict[str, Any] = field(default_factory=dict)
     local_lists: dict[str, list[Any]] = field(default_factory=dict)
     is_stage: bool = False
@@ -60,8 +66,11 @@ class ThreadState:
     waiting_for_children: set[int] = field(default_factory=set)
     wait_reason: str | None = None
     waiting_for_answer: AskState | None = None
+    dialogue_clear_instance_id: int | None = None
+    dialogue_clear_token: int | None = None
     glide: dict[str, float] | None = None
     compiled_runner: Any = None
+    current_stmt: Any = None
 
     def current_arguments(self) -> dict[str, Any]:
         for frame in reversed(self.frames):
@@ -217,6 +226,7 @@ class VMState:
                 "size": instance.size,
                 "layer_order": instance.layer_order,
                 "effects": dict(sorted(instance.effects.items())),
+                "dialogue": None if instance.dialogue is None else dict(instance.dialogue),
                 "costume": self._costume_reference(project, instance.source_target_name, instance.costume_index),
                 "collision": {
                     "api": "unavailable",
@@ -243,6 +253,7 @@ class VMState:
                 "source_target_name": stage.source_target_name,
                 "backdrop": self._costume_reference(project, stage.source_target_name, stage.costume_index),
                 "effects": dict(sorted(stage.effects.items())),
+                "dialogue": None if stage.dialogue is None else dict(stage.dialogue),
             },
             "drawables": drawables,
             "collision_boundary": {
@@ -267,6 +278,7 @@ class VMState:
             "costume_index": instance.costume_index,
             "layer_order": instance.layer_order,
             "effects": dict(sorted(instance.effects.items())),
+            "dialogue": None if instance.dialogue is None else dict(instance.dialogue),
             "variables": dict(sorted(instance.local_variables.items())),
             "lists": {key: list(value) for key, value in sorted(instance.local_lists.items())},
         }
@@ -294,3 +306,6 @@ class VMState:
             "asset_id": costume.get("assetId"),
             "md5ext": costume.get("md5ext"),
         }
+
+
+instrument_module(globals(), _LOGGER)

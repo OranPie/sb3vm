@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import math
 from typing import Any, Callable
+from sb3vm.log import get_logger, instrument_module
+
+
+_LOGGER = get_logger(__name__)
 
 
 RandomIndexFn = Callable[[int], int]
@@ -134,3 +138,6 @@ def letter_of(index: Any, value: Any) -> str:
     resolved = int(to_number(index)) - 1
     text = to_string(value)
     return text[resolved] if 0 <= resolved < len(text) else ""
+
+
+instrument_module(globals(), _LOGGER)

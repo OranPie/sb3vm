@@ -2,6 +2,10 @@
 
 Headless Scratch `.sb3` VM in Python.
 
+Install:
+- editable install: `pip install -e .`
+- editable install with renderer extras: `pip install -e .[render]`
+
 Included:
 - `.sb3` load/save roundtrip
 - project data preservation for known fields and raw JSON passthrough

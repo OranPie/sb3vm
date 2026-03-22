@@ -7,6 +7,10 @@ from sb3vm.parse.ast_nodes import AskState
 from sb3vm.vm.input_provider import normalize_key_name
 from sb3vm.vm.ir import IrExpr, IrScript, IrStmt
 from sb3vm.vm.scratch_values import list_contains, list_contents, resolve_list_index, to_bool, to_number, to_string
+from sb3vm.log import get_logger, instrument_module
+
+
+_LOGGER = get_logger(__name__)
 
 
 CompiledRunner = Generator[str | None, None, None]
@@ -115,6 +119,16 @@ def compile_stmt(stmt: IrStmt) -> StmtFn:
 
         def run(vm: Any, thread: Any) -> CompiledRunner:
             thread.wake_time = vm.state.time_seconds + max(0.0, to_number(duration_fn(vm, thread)))
+            yield "block"
+
+        return run
+    if kind == "music_play_note":
+        note_fn = compile_expr(stmt.get("note"))
+        beats_fn = compile_expr(stmt.get("beats"))
+
+        def run(vm: Any, thread: Any) -> CompiledRunner:
+            note_fn(vm, thread)
+            thread.wake_time = vm.state.time_seconds + vm._beats_to_seconds(beats_fn(vm, thread))
             yield "block"
 
         return run
@@ -227,8 +241,11 @@ def compile_stmt(stmt: IrStmt) -> StmtFn:
 
         def run(vm: Any, thread: Any) -> CompiledRunner:
             values = {name: expr_fn(vm, thread) for name, expr_fn in compiled_args.items()}
-            vm._execute_looks_state(thread, mode, {**raw_args, **values})
-            yield "yield"
+            result = vm._execute_looks_state(thread, mode, {**raw_args, **values})
+            if result == "block":
+                yield "block"
+            else:
+                yield "yield"
 
         return run
     if kind == "reset_timer":
@@ -257,6 +274,9 @@ def compile_expr(expr: IrExpr) -> ExprFn:
         return lambda vm, thread: vm.input_provider.mouse_y()
     if kind == "mouse_down":
         return lambda vm, thread: vm.input_provider.mouse_down()
+    if kind == "touching_object":
+        arg_fns = tuple(compile_expr(arg) for arg in expr.args)
+        return lambda vm, thread: vm.touching_object(thread.instance_id, arg_fns[0](vm, thread))
     if kind == "x_position":
         return lambda vm, thread: vm.state.instances[thread.instance_id].x
     if kind == "y_position":
@@ -369,3 +389,6 @@ def compile_expr(expr: IrExpr) -> ExprFn:
 
         return run
     raise ValueError(f"Unsupported compiled expression: {kind}")
+
+
+instrument_module(globals(), _LOGGER)

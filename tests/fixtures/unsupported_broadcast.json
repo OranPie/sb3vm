@@ -13,18 +13,18 @@
       "blocks": {
         "hat": {
           "opcode": "event_whenflagclicked",
-          "next": "say",
+          "next": "move",
           "parent": null,
           "inputs": {},
           "fields": {},
           "topLevel": true
         },
-        "say": {
-          "opcode": "looks_say",
+        "move": {
+          "opcode": "motion_movesteps",
           "next": null,
           "parent": "hat",
           "inputs": {
-            "MESSAGE": [1, [10, "hello"]]
+            "STEPS": [1, [4, "10"]]
           },
           "fields": {},
           "topLevel": false
