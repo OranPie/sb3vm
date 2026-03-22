@@ -5,7 +5,7 @@ from typing import Any
 from sb3vm.model.project import Project, Target
 from sb3vm.parse.ast_nodes import Expr, ProcedureDefinition, Script, Stmt, Trigger
 from sb3vm.parse.extract_scripts import extract_scripts
-from sb3vm.log import get_logger, instrument_module
+from sb3vm.log import get_logger
 
 
 _LOGGER = get_logger(__name__)
@@ -304,5 +304,3 @@ def render_project_text(project: Project) -> str:
         lines.extend(_render_target(target, procedures_by_target.get(target.name, []), scripts_by_target.get(target.name, [])))
     return "\n".join(lines) + "\n"
 
-
-instrument_module(globals(), _LOGGER)

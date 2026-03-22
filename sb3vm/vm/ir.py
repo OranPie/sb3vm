@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from sb3vm.parse.ast_nodes import Expr, Script, Stmt
-from sb3vm.log import get_logger, instrument_module
+from sb3vm.log import get_logger
 
 
 _LOGGER = get_logger(__name__)
@@ -197,5 +197,3 @@ def classify_expr(expr: IrExpr) -> str | None:
             return reason
     return None
 
-
-instrument_module(globals(), _LOGGER)

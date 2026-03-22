@@ -4,7 +4,7 @@ import json
 import zipfile
 from pathlib import Path
 
-from sb3vm.log import debug, get_logger, info, instrument_module
+from sb3vm.log import debug, get_logger, info
 from sb3vm.model.project import Project
 
 
@@ -22,5 +22,3 @@ def save_sb3(project: Project, path: str | Path) -> None:
             zf.writestr(name, payload)
     info(_LOGGER, "io.save_sb3", "saved archive %s assets=%d", path, len(project.assets))
 
-
-instrument_module(globals(), _LOGGER)

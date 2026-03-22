@@ -5,7 +5,7 @@ from typing import Any
 
 from sb3vm.model.project import Project
 from sb3vm.parse.ast_nodes import AskState, RuntimeDiagnostic, UnsupportedDiagnostic
-from sb3vm.log import get_logger, instrument_module
+from sb3vm.log import get_logger
 
 
 _LOGGER = get_logger(__name__)
@@ -307,5 +307,3 @@ class VMState:
             "md5ext": costume.get("md5ext"),
         }
 
-
-instrument_module(globals(), _LOGGER)

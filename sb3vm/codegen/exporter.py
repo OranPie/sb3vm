@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from sb3vm.io.load_sb3 import load_sb3
-from sb3vm.log import debug, get_logger, info, instrument_module
+from sb3vm.log import debug, get_logger, info, trace
 from sb3vm.model.project import Project, Target
 from sb3vm.parse.ast_nodes import Expr, ProcedureDefinition, Script, Stmt
 from sb3vm.parse.extract_scripts import extract_scripts
@@ -270,6 +270,7 @@ class _Exporter:
             lines.append("")
         for target in self.project.targets:
             alias = self.target_aliases[target.name]
+            trace(_LOGGER, "codegen.exporter.render", "emitting target %s as %s", target.name, alias)
             if target.is_stage:
                 self._emit_target_properties(lines, alias, target)
             else:
@@ -579,6 +580,3 @@ def save_project_source(source: Project | str | Path, output: str | Path) -> str
     output_path.write_text(rendered, encoding='utf-8')
     info(_LOGGER, "codegen.save_project_source", "saved exported source to %s", output_path)
     return rendered
-
-
-instrument_module(globals(), _LOGGER)

@@ -6,7 +6,7 @@ from typing import Any
 from sb3vm.model.project import Project
 from sb3vm.render.assets import RenderAssetStore, RendererDependencyError, RendererError
 from sb3vm.vm.runtime import Sb3Vm
-from sb3vm.log import get_logger, instrument_module
+from sb3vm.log import get_logger
 
 
 _LOGGER = get_logger(__name__)
@@ -155,5 +155,3 @@ class MinimalRenderer:
             return rendered
         return rendered.rotate(angle, expand=True)
 
-
-instrument_module(globals(), _LOGGER)

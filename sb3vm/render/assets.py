@@ -6,7 +6,7 @@ from typing import Any
 
 from sb3vm.model.project import Project
 from sb3vm.vm.errors import Sb3VmError
-from sb3vm.log import get_logger, instrument_module
+from sb3vm.log import get_logger
 
 
 _LOGGER = get_logger(__name__)
@@ -70,5 +70,3 @@ class RenderAssetStore:
                 "SVG rendering requires cairosvg with a working cairo library."
             ) from exc
 
-
-instrument_module(globals(), _LOGGER)

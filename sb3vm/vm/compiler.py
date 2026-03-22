@@ -7,7 +7,7 @@ from sb3vm.parse.ast_nodes import AskState
 from sb3vm.vm.input_provider import normalize_key_name
 from sb3vm.vm.ir import IrExpr, IrScript, IrStmt
 from sb3vm.vm.scratch_values import list_contains, list_contents, resolve_list_index, to_bool, to_number, to_string
-from sb3vm.log import get_logger, instrument_module
+from sb3vm.log import get_logger
 
 
 _LOGGER = get_logger(__name__)
@@ -390,5 +390,3 @@ def compile_expr(expr: IrExpr) -> ExprFn:
         return run
     raise ValueError(f"Unsupported compiled expression: {kind}")
 
-
-instrument_module(globals(), _LOGGER)

@@ -6,7 +6,7 @@ import struct
 from dataclasses import dataclass, replace
 from typing import Any
 
-from sb3vm.log import debug, get_logger, info, instrument_module, warn
+from sb3vm.log import debug, get_logger, info, trace, warn
 from sb3vm.model.project import Project
 from sb3vm.parse.ast_nodes import AskState, RuntimeDiagnostic, Script, Stmt
 from sb3vm.parse.extract_scripts import extract_scripts
@@ -369,6 +369,7 @@ class Sb3Vm:
         return thread
 
     def step(self, dt: float) -> None:
+        trace(_LOGGER, "vm.Sb3Vm.step", "step begin dt=%.5f time=%.5f threads=%d", dt, self.state.time_seconds, len(self.state.threads))
         self.state.time_seconds += dt
         self._poll_input_events()
         threads = self.state.threads
@@ -405,6 +406,7 @@ class Sb3Vm:
         for instance_id in list(self._pending_instance_deletions):
             self.state.instances.pop(instance_id, None)
             self._pending_instance_deletions.discard(instance_id)
+        trace(_LOGGER, "vm.Sb3Vm.step", "step end time=%.5f threads=%d", self.state.time_seconds, len(self.state.threads))
 
     def _advance_thread(self, thread: ThreadState) -> None:
         executed = 0
@@ -1184,6 +1186,3 @@ class Sb3Vm:
         new_index = min(max(current_index + delta, 0), len(ordered))
         ordered.insert(new_index, instance)
         self._reindex_layers(ordered)
-
-
-instrument_module(globals(), _LOGGER)

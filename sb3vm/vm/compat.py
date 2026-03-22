@@ -9,7 +9,7 @@ from sb3vm.io.load_sb3 import load_sb3
 from sb3vm.vm.errors import ProjectValidationError
 from sb3vm.vm.input_provider import HeadlessInputProvider
 from sb3vm.vm.runtime import Sb3Vm
-from sb3vm.log import get_logger, instrument_module
+from sb3vm.log import get_logger
 
 
 _LOGGER = get_logger(__name__)
@@ -395,5 +395,3 @@ def _apply_expected_label_regression(spec: FixtureSpec, result: FixtureRunResult
             f"label: expected {spec.expected_label!r}, got {result.label!r}"
         )
 
-
-instrument_module(globals(), _LOGGER)

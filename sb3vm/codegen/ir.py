@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any
-from sb3vm.log import get_logger, instrument_module
+from sb3vm.log import get_logger
 
 
 _LOGGER = get_logger(__name__)
@@ -75,5 +75,3 @@ class CgProject:
     extensions: tuple[str, ...] = ()
     assets: tuple[tuple[str, bytes], ...] = ()
 
-
-instrument_module(globals(), _LOGGER)

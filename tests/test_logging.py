@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import io
 
-from sb3vm.log import TRACE, configure_logging, debug, error, fatal, get_logger, info, instrument_module, trace, warn
+from sb3vm.log import TRACE, configure_logging, debug, error, fatal, get_logger, info, trace, warn
 
 
 def test_logging_helpers_emit_all_levels_and_source_parts() -> None:
@@ -24,36 +24,15 @@ def test_logging_helpers_emit_all_levels_and_source_parts() -> None:
     assert "WARNING sb3vm.tests.logging [test.warn] warn message" in output
     assert "ERROR sb3vm.tests.logging [test.error] error message" in output
     assert "CRITICAL sb3vm.tests.logging [test.fatal] fatal message" in output
-
-
-def test_instrument_module_wraps_functions_and_methods_with_trace_logs() -> None:
+def test_trace_level_configures_and_logs_manually() -> None:
     stream = io.StringIO()
-    configure_logging(TRACE, force=True, stream=stream)
-    logger = get_logger("demo.instrumented")
+    resolved = configure_logging(TRACE, force=True, stream=stream)
+    logger = get_logger("demo.manual")
 
-    def sample(value: int) -> int:
-        return value + 1
-
-    class Demo:
-        def hello(self, name: str) -> str:
-            return f"hello {name}"
-
-    sample.__module__ = "demo.instrumented"
-    Demo.__module__ = "demo.instrumented"
-
-    namespace = {
-        "__name__": "demo.instrumented",
-        "sample": sample,
-        "Demo": Demo,
-    }
-    count = instrument_module(namespace, logger)
-
-    assert count >= 2
-    assert namespace["sample"](4) == 5
-    assert namespace["Demo"]().hello("Ada") == "hello Ada"
+    trace(logger, "demo.manual.run", "manual trace %s", 1)
+    debug(logger, "demo.manual.run", "manual debug %s", 2)
 
     output = stream.getvalue()
-    assert "[demo.instrumented.sample] enter(4)" in output
-    assert "[demo.instrumented.sample] exit -> 5" in output
-    assert "[demo.instrumented.Demo.hello] enter(" in output
-    assert "[demo.instrumented.Demo.hello] exit -> 'hello Ada'" in output
+    assert resolved == TRACE
+    assert "TRACE demo.manual [demo.manual.run] manual trace 1" in output
+    assert "DEBUG demo.manual [demo.manual.run] manual debug 2" in output

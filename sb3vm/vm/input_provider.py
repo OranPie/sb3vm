@@ -3,7 +3,7 @@ from __future__ import annotations
 import random
 from dataclasses import dataclass, field
 from typing import Protocol
-from sb3vm.log import get_logger, instrument_module
+from sb3vm.log import get_logger
 
 
 _LOGGER = get_logger(__name__)
@@ -105,5 +105,3 @@ class VmRng:
     def randrange(self, stop: int) -> int:
         return self._random.randrange(stop)
 
-
-instrument_module(globals(), _LOGGER)

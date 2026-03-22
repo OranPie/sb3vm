@@ -5,7 +5,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any
 
-from sb3vm.log import debug, get_logger, info, instrument_module, warn
+from sb3vm.log import debug, get_logger, info, warn
 from sb3vm.model.project import Project, Target
 from sb3vm.parse.ast_nodes import Expr, ProcedureDefinition, Script, Stmt, Trigger, UnsupportedDiagnostic
 from sb3vm.vm.errors import ProjectValidationError
@@ -868,5 +868,3 @@ class ProjectParser:
             return raw
         return str(raw).lower() == "true"
 
-
-instrument_module(globals(), _LOGGER)

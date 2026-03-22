@@ -13,7 +13,7 @@ from typing import Any
 from sb3vm.codegen.api import ListHandle, ProcedureBinding, ScratchConstant, ScratchEnum, ScratchProject, TargetBuilder, VariableHandle
 from sb3vm.codegen.ir import CgExpr, CgProcedure, CgProject, CgScript, CgStmt, CgTarget
 from sb3vm.io.save_sb3 import save_sb3
-from sb3vm.log import debug, error, get_logger, info, instrument_module
+from sb3vm.log import debug, error, get_logger, info
 from sb3vm.model.project import Project
 from sb3vm.vm.errors import Sb3VmError
 from sb3vm.vm.runtime import Sb3Vm
@@ -1200,5 +1200,3 @@ def _literal_payload(value: Any) -> list[Any]:
         return [4, str(value)]
     return [10, str(value)]
 
-
-instrument_module(globals(), _LOGGER)

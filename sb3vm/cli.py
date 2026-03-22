@@ -8,7 +8,7 @@ from pathlib import Path
 from sb3vm.codegen import CodegenError, build_project, export_project_source, load_authoring_module, run_authored_project, save_authored_project
 from sb3vm.io.load_sb3 import load_sb3
 from sb3vm.io.save_sb3 import save_sb3
-from sb3vm.log import configure_logging, debug, error, fatal, get_logger, info, instrument_module
+from sb3vm.log import configure_logging, debug, error, fatal, get_logger, info
 from sb3vm.parse.pretty import render_project_text
 from sb3vm.render import MinimalRenderer, RendererError
 from sb3vm.vm.compat import default_manifest_path, run_compat_suite
@@ -264,8 +264,6 @@ def main() -> int:
         raise
 
 
-
-instrument_module(globals(), _LOGGER)
 
 
 if __name__ == "__main__":

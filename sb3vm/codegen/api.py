@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable
-from sb3vm.log import get_logger, instrument_module
+from sb3vm.log import get_logger
 
 
 _LOGGER = get_logger(__name__)
@@ -497,5 +497,3 @@ class ScratchProject:
     def all_targets(self) -> list[TargetBuilder]:
         return [self.stage, *self.sprites]
 
-
-instrument_module(globals(), _LOGGER)

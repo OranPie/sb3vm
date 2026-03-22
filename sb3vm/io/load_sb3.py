@@ -4,7 +4,7 @@ import json
 import zipfile
 from pathlib import Path
 
-from sb3vm.log import debug, error, get_logger, info, instrument_module
+from sb3vm.log import error, get_logger, info, trace
 from sb3vm.model.project import Project
 from sb3vm.vm.errors import ProjectValidationError
 
@@ -21,7 +21,7 @@ def load_sb3(path: str | Path) -> Project:
             project_json: dict | None = None
             for member in zf.infolist():
                 payload = zf.read(member.filename)
-                debug(_LOGGER, "io.load_sb3", "read zip entry %s bytes=%d", member.filename, len(payload))
+                trace(_LOGGER, "io.load_sb3", "read zip entry %s bytes=%d", member.filename, len(payload))
                 if member.filename == "project.json":
                     try:
                         project_json = json.loads(payload.decode("utf-8"))
@@ -46,6 +46,3 @@ def load_sb3(path: str | Path) -> Project:
     project = Project.from_json(project_json, assets)
     info(_LOGGER, "io.load_sb3", "loaded project %s targets=%d assets=%d", path, len(project.targets), len(project.assets))
     return project
-
-
-instrument_module(globals(), _LOGGER)

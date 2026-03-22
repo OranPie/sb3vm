@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from sb3vm.vm.errors import ProjectValidationError
-from sb3vm.log import get_logger, instrument_module
+from sb3vm.log import get_logger
 
 
 _LOGGER = get_logger(__name__)
@@ -246,5 +246,3 @@ def _parse_dict_of_scalars(raw: Any, field_name: str, target_name: str) -> dict[
 def _raise_monitor_error() -> dict[str, Any]:
     raise ProjectValidationError("Project field 'monitors' entries must be objects")
 
-
-instrument_module(globals(), _LOGGER)
