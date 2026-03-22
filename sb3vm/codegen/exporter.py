@@ -8,7 +8,7 @@ from typing import Any
 
 from sb3vm.io.load_sb3 import load_sb3
 from sb3vm.log import debug, get_logger, info, trace
-from sb3vm.model.project import Project, Target
+from sb3vm.model.project import Project, Target, project_display_name
 from sb3vm.parse.ast_nodes import Expr, ProcedureDefinition, Script, Stmt
 from sb3vm.parse.extract_scripts import extract_scripts
 
@@ -25,6 +25,7 @@ _IMPORT_NAMES = [
     "LayerPosition",
     "MOUSE_POINTER",
     "MYSELF",
+    "MonitorSpec",
     "RANDOM_POSITION",
     "RotationStyle",
     "ScratchProject",
@@ -278,6 +279,47 @@ class _Exporter:
             f"extras={self._literal(extras)})"
         )
 
+    def _monitor_literal(self, monitor: dict[str, Any]) -> str:
+        extras = {
+            key: value
+            for key, value in monitor.items()
+            if key
+            not in {
+                "id",
+                "opcode",
+                "params",
+                "mode",
+                "spriteName",
+                "visible",
+                "x",
+                "y",
+                "width",
+                "height",
+                "label",
+                "sliderMin",
+                "sliderMax",
+                "isDiscrete",
+            }
+        }
+        return (
+            "MonitorSpec("
+            f"id={self._literal(monitor.get('id', ''))}, "
+            f"opcode={self._literal(monitor.get('opcode', ''))}, "
+            f"params={self._literal(monitor.get('params', {}))}, "
+            f"mode={self._literal(monitor.get('mode'))}, "
+            f"sprite_name={self._literal(monitor.get('spriteName'))}, "
+            f"visible={self._literal(monitor.get('visible'))}, "
+            f"x={self._literal(monitor.get('x'))}, "
+            f"y={self._literal(monitor.get('y'))}, "
+            f"width={self._literal(monitor.get('width'))}, "
+            f"height={self._literal(monitor.get('height'))}, "
+            f"label={self._literal(monitor.get('label'))}, "
+            f"slider_min={self._literal(monitor.get('sliderMin'))}, "
+            f"slider_max={self._literal(monitor.get('sliderMax'))}, "
+            f"is_discrete={self._literal(monitor.get('isDiscrete'))}, "
+            f"extras={self._literal(extras)})"
+        )
+
     def _validate(self) -> None:
         unsupported = [script for script in self.parse_result.scripts if not script.supported]
         if unsupported:
@@ -314,7 +356,9 @@ class _Exporter:
             param_allocator = _NameAllocator()
             for index, arg_id in enumerate(procedure.argument_ids, start=1):
                 display = procedure.argument_names[index - 1] if index - 1 < len(procedure.argument_names) else f"arg{index}"
-                param_names[arg_id] = param_allocator.alloc(display, f"arg{index}")
+                alias = param_allocator.alloc(display, f"arg{index}")
+                param_names[arg_id] = alias
+                param_names[display] = alias
             self.procedure_param_names[(procedure.target_name, procedure.proccode)] = param_names
         per_target_counts: dict[str, int] = {}
         for script in self.parse_result.scripts:
@@ -338,7 +382,7 @@ class _Exporter:
         if any(target.costumes or target.sounds for target in self.project.targets):
             lines.append(f"from sb3vm.codegen.stdlib import {', '.join(_STDLIB_IMPORT_NAMES)}")
         lines.append("")
-        lines.append(f"project = ScratchProject({self._literal(self.project.meta.get('vm', 'Scratch Project'))})")
+        lines.append(f"project = ScratchProject({self._literal(project_display_name(self.project.meta))})")
         lines.append("stage = project.stage")
         for extension in self.project.extensions:
             lines.append(f"project.extensions.append({self._literal(extension)})")
@@ -378,6 +422,10 @@ class _Exporter:
                 target_alias = self.target_aliases[target.name]
                 lines.append(f"{alias} = {target_alias}.list({self._literal(name)}, {list(values)!r})")
         if self.variable_aliases or self.list_aliases:
+            lines.append("")
+        for monitor in self.project.monitors:
+            lines.append(f"project.add_monitor({self._monitor_literal(monitor)})")
+        if self.project.monitors:
             lines.append("")
         for procedure in self.parse_result.procedures:
             lines.extend(self._emit_procedure(procedure))
@@ -449,6 +497,8 @@ class _Exporter:
             lines.append(f"@{target_alias}.when_broadcast_received({self._literal(trigger.value or '')})")
         elif trigger.kind == "clone_start":
             lines.append(f"@{target_alias}.when_started_as_clone()")
+        elif trigger.kind == "sprite_clicked":
+            lines.append(f"@{target_alias}.when_this_sprite_clicked()")
         else:
             raise CodegenError(f"Unsupported trigger kind for export: {trigger.kind!r}")
         lines.append(f"def {fn_name}():")

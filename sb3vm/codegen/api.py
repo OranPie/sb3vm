@@ -182,6 +182,89 @@ class ListHandle:
         return _authoring_only("ListHandle.text")(self)
 
 
+@dataclass
+class MonitorSpec:
+    id: str
+    opcode: str
+    params: dict[str, Any] = field(default_factory=dict)
+    mode: str | None = "default"
+    sprite_name: str | None = None
+    visible: bool | None = True
+    x: int | float | None = None
+    y: int | float | None = None
+    width: int | float | None = None
+    height: int | float | None = None
+    label: str | None = None
+    slider_min: int | float | None = None
+    slider_max: int | float | None = None
+    is_discrete: bool | None = None
+    extras: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "id": self.id,
+            "opcode": self.opcode,
+            "params": dict(self.params),
+            **dict(self.extras),
+        }
+        if self.mode is not None:
+            payload["mode"] = self.mode
+        if self.sprite_name is not None:
+            payload["spriteName"] = self.sprite_name
+        if self.visible is not None:
+            payload["visible"] = self.visible
+        if self.x is not None:
+            payload["x"] = self.x
+        if self.y is not None:
+            payload["y"] = self.y
+        if self.width is not None:
+            payload["width"] = self.width
+        if self.height is not None:
+            payload["height"] = self.height
+        if self.label is not None:
+            payload["label"] = self.label
+        if self.slider_min is not None:
+            payload["sliderMin"] = self.slider_min
+        if self.slider_max is not None:
+            payload["sliderMax"] = self.slider_max
+        if self.is_discrete is not None:
+            payload["isDiscrete"] = self.is_discrete
+        return payload
+
+
+def variable_monitor(
+    variable: VariableHandle,
+    *,
+    monitor_id: str | None = None,
+    visible: bool | None = True,
+    x: int | float | None = None,
+    y: int | float | None = None,
+    label: str | None = None,
+    mode: str | None = "default",
+    slider_min: int | float | None = None,
+    slider_max: int | float | None = None,
+    is_discrete: bool | None = None,
+    **extras: Any,
+) -> MonitorSpec:
+    target_name = variable.target_name.strip()
+    monitor_token = re.sub(r"\W+", "-", f"{target_name}-{variable.name}").strip("-").lower() or "monitor"
+    return MonitorSpec(
+        id=monitor_id or f"{monitor_token}-monitor",
+        opcode="data_variable",
+        params={"VARIABLE": variable.name},
+        mode=mode,
+        sprite_name=None if target_name == "Stage" else target_name,
+        visible=visible,
+        x=x,
+        y=y,
+        label=label,
+        slider_min=slider_min,
+        slider_max=slider_max,
+        is_discrete=is_discrete,
+        extras=dict(extras),
+    )
+
+
 @dataclass(frozen=True)
 class ScratchConstant:
     value: str
@@ -330,6 +413,16 @@ class TargetBuilder:
     def when_started_as_clone(self) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
             self.scripts.append(ScriptBinding(kind="clone_start", target_name=self.name, trigger_value=None, function=fn))
+            return fn
+
+        return decorator
+
+    def when_this_sprite_clicked(self) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+        if self.is_stage:
+            raise AuthoringRuntimeError("when_this_sprite_clicked() is only valid for sprites")
+
+        def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
+            self.scripts.append(ScriptBinding(kind="sprite_clicked", target_name=self.name, trigger_value=None, function=fn))
             return fn
 
         return decorator
@@ -508,18 +601,52 @@ class TargetBuilder:
     def add_sound(self, sound: Any) -> None:
         self.sounds.append(_coerce_project_record(sound))
 
+    def monitor_variable(
+        self,
+        variable: VariableHandle,
+        *,
+        monitor_id: str | None = None,
+        visible: bool | None = True,
+        x: int | float | None = None,
+        y: int | float | None = None,
+        label: str | None = None,
+        mode: str | None = "default",
+        slider_min: int | float | None = None,
+        slider_max: int | float | None = None,
+        is_discrete: bool | None = None,
+        **extras: Any,
+    ) -> MonitorSpec:
+        return self.project.monitor_variable(
+            variable,
+            monitor_id=monitor_id,
+            visible=visible,
+            x=x,
+            y=y,
+            label=label,
+            mode=mode,
+            slider_min=slider_min,
+            slider_max=slider_max,
+            is_discrete=is_discrete,
+            **extras,
+        )
+
 
 @dataclass
 class ScratchProject:
     name: str = "Scratch Project"
     stage: TargetBuilder = field(init=False)
+    stdlib: Any = field(init=False, repr=False)
     sprites: list[TargetBuilder] = field(default_factory=list)
     broadcasts: set[str] = field(default_factory=set)
+    monitors: list[dict[str, Any]] = field(default_factory=list)
     extensions: list[str] = field(default_factory=list)
     assets: dict[str, bytes] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        from sb3vm.codegen.stdlib import ProjectStdlib
+
         self.stage = TargetBuilder(project=self, name="Stage", is_stage=True)
+        self.stdlib = ProjectStdlib(self)
 
     def sprite(
         self,
@@ -548,6 +675,40 @@ class ScratchProject:
 
     def add_asset(self, name: str, payload: bytes) -> None:
         self.assets[name] = payload
+
+    def add_monitor(self, monitor: Any) -> None:
+        self.monitors.append(_coerce_project_record(monitor))
+
+    def monitor_variable(
+        self,
+        variable: VariableHandle,
+        *,
+        monitor_id: str | None = None,
+        visible: bool | None = True,
+        x: int | float | None = None,
+        y: int | float | None = None,
+        label: str | None = None,
+        mode: str | None = "default",
+        slider_min: int | float | None = None,
+        slider_max: int | float | None = None,
+        is_discrete: bool | None = None,
+        **extras: Any,
+    ) -> MonitorSpec:
+        monitor = variable_monitor(
+            variable,
+            monitor_id=monitor_id,
+            visible=visible,
+            x=x,
+            y=y,
+            label=label,
+            mode=mode,
+            slider_min=slider_min,
+            slider_max=slider_max,
+            is_discrete=is_discrete,
+            **extras,
+        )
+        self.add_monitor(monitor)
+        return monitor
 
     def all_targets(self) -> list[TargetBuilder]:
         return [self.stage, *self.sprites]

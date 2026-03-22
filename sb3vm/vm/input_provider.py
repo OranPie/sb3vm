@@ -3,7 +3,7 @@ from __future__ import annotations
 import random
 from dataclasses import dataclass, field
 from typing import Protocol
-from sb3vm.log import get_logger
+from sb3vm.log import debug, get_logger, trace
 
 
 _LOGGER = get_logger(__name__)
@@ -87,6 +87,34 @@ class HeadlessInputProvider:
             "mouse_down": self.mouse_down_value,
             "timer_override": self.timer_override_value,
         }
+
+
+@dataclass
+class InteractiveInputProvider(HeadlessInputProvider):
+    def press_key(self, key_name: str) -> None:
+        normalized = normalize_key_name(key_name)
+        if not normalized:
+            return
+        self.pressed_keys.add(normalized)
+        trace(_LOGGER, "vm.InteractiveInputProvider.press_key", "pressed key=%s", normalized)
+
+    def release_key(self, key_name: str) -> None:
+        normalized = normalize_key_name(key_name)
+        self.pressed_keys.discard(normalized)
+        trace(_LOGGER, "vm.InteractiveInputProvider.release_key", "released key=%s", normalized)
+
+    def set_mouse_position(self, x: float, y: float) -> None:
+        self.mouse_x_value = x
+        self.mouse_y_value = y
+        trace(_LOGGER, "vm.InteractiveInputProvider.set_mouse_position", "mouse position x=%.2f y=%.2f", x, y)
+
+    def set_mouse_button(self, down: bool) -> None:
+        self.mouse_down_value = down
+        trace(_LOGGER, "vm.InteractiveInputProvider.set_mouse_button", "mouse down=%s", down)
+
+    def queue_answer(self, value: str) -> None:
+        self.answers.append(value)
+        debug(_LOGGER, "vm.InteractiveInputProvider.queue_answer", "queued answer len=%d", len(value))
 
 
 @dataclass

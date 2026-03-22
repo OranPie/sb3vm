@@ -18,6 +18,7 @@ SUPPORTED_EVENT_OPS = {
     "event_whenkeypressed",
     "event_whenbackdropswitchesto",
     "event_whenbroadcastreceived",
+    "event_whenthisspriteclicked",
     "control_start_as_clone",
 }
 
@@ -279,7 +280,7 @@ class ProjectParser:
         self.procedures_by_target[target.name] = procedures
         for procedure in procedures.values():
             definition_block = target.blocks[procedure.block_id or ""]
-            arg_map = {name: arg_id for arg_id, name in zip(procedure.argument_ids, procedure.argument_names)}
+            arg_map = {name: name for name in procedure.argument_names}
             procedure.body = self.parse_stmt_chain(target, definition_block.get("next"), procedure_args=arg_map)
 
     def parse_procedure_signature(self, target: Target, block_id: str, block: dict[str, Any]) -> ProcedureDefinition:
@@ -335,6 +336,8 @@ class ProjectParser:
             return Trigger("backdrop_switched", self.field_value(block, "BACKDROP") or "")
         if opcode == "event_whenbroadcastreceived":
             return Trigger("broadcast_received", self.field_value(block, "BROADCAST_OPTION"))
+        if opcode == "event_whenthisspriteclicked":
+            return Trigger("sprite_clicked")
         if opcode == "control_start_as_clone":
             return Trigger("clone_start")
         return Trigger("unknown")
@@ -867,4 +870,3 @@ class ProjectParser:
         if isinstance(raw, bool):
             return raw
         return str(raw).lower() == "true"
-

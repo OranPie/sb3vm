@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import re
 from typing import Any
 
 from sb3vm.vm.errors import ProjectValidationError
@@ -8,6 +9,21 @@ from sb3vm.log import get_logger
 
 
 _LOGGER = get_logger(__name__)
+_VM_VERSION_PATTERN = re.compile(r"^([0-9]+\.[0-9]+\.[0-9]+)($|-)")
+
+
+def is_valid_vm_version(value: Any) -> bool:
+    return isinstance(value, str) and _VM_VERSION_PATTERN.match(value.strip()) is not None
+
+
+def project_display_name(meta: dict[str, Any], default: str = "Scratch Project") -> str:
+    authored_name = meta.get("sb3vmProjectName")
+    if isinstance(authored_name, str) and authored_name.strip():
+        return authored_name
+    vm_value = meta.get("vm")
+    if isinstance(vm_value, str) and vm_value.strip() and not is_valid_vm_version(vm_value):
+        return vm_value
+    return default
 
 
 @dataclass
@@ -245,4 +261,3 @@ def _parse_dict_of_scalars(raw: Any, field_name: str, target_name: str) -> dict[
 
 def _raise_monitor_error() -> dict[str, Any]:
     raise ProjectValidationError("Project field 'monitors' entries must be objects")
-

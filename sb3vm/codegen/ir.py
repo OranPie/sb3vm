@@ -72,6 +72,6 @@ class CgProject:
     name: str
     targets: tuple[CgTarget, ...]
     broadcasts: tuple[str, ...]
+    monitors: tuple[dict[str, Any], ...] = ()
     extensions: tuple[str, ...] = ()
     assets: tuple[tuple[str, bytes], ...] = ()
-

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from sb3vm.model.project import Project, Target
+from sb3vm.model.project import Project, Target, project_display_name
 from sb3vm.parse.ast_nodes import Expr, ProcedureDefinition, Script, Stmt, Trigger
 from sb3vm.parse.extract_scripts import extract_scripts
 from sb3vm.log import get_logger
@@ -31,6 +31,8 @@ def format_trigger(trigger: Trigger) -> str:
         return f"when backdrop switched to {trigger.value!r}"
     if trigger.kind == "broadcast_received":
         return f"when broadcast received {trigger.value!r}"
+    if trigger.kind == "sprite_clicked":
+        return "when this sprite clicked"
     if trigger.kind == "clone_start":
         return "when started as clone"
     return f"when {trigger.kind}"
@@ -285,7 +287,7 @@ def _render_target(target: Target, procedures: list[ProcedureDefinition], script
 
 def render_project_text(project: Project) -> str:
     parsed = extract_scripts(project)
-    lines = [f"Project: {project.meta.get('vm', 'Scratch Project')}"]
+    lines = [f"Project: {project_display_name(project.meta)}"]
     if project.extensions:
         lines.append("Extensions: " + ", ".join(project.extensions))
     if project.assets:
@@ -303,4 +305,3 @@ def render_project_text(project: Project) -> str:
             lines.append("")
         lines.extend(_render_target(target, procedures_by_target.get(target.name, []), scripts_by_target.get(target.name, [])))
     return "\n".join(lines) + "\n"
-

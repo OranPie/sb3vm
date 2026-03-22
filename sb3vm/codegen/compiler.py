@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import importlib.util
 import inspect
 import json
+import re
 import sys
 import textwrap
 from dataclasses import dataclass, field
@@ -19,6 +21,7 @@ from sb3vm.codegen.api import (
     ScratchProject,
     TargetBuilder,
     VariableHandle,
+    _coerce_project_record,
 )
 from sb3vm.codegen.ir import CgExpr, CgProcedure, CgProject, CgScript, CgStmt, CgTarget
 from sb3vm.io.save_sb3 import save_sb3
@@ -29,6 +32,24 @@ from sb3vm.vm.runtime import Sb3Vm
 
 
 _LOGGER = get_logger(__name__)
+_SB3VM_VM_VERSION = "0.0.0"
+_DEFAULT_STAGE_COSTUME = b"""<svg xmlns="http://www.w3.org/2000/svg" width="480" height="360" viewBox="0 0 480 360">
+<defs>
+<linearGradient id="bg" x1="0" x2="1" y1="0" y2="1">
+<stop offset="0%" stop-color="#f8fafc"/>
+<stop offset="100%" stop-color="#dbeafe"/>
+</linearGradient>
+</defs>
+<rect width="480" height="360" fill="url(#bg)"/>
+<circle cx="82" cy="74" r="30" fill="#fde68a" fill-opacity="0.85"/>
+<circle cx="392" cy="288" r="54" fill="#bfdbfe" fill-opacity="0.8"/>
+</svg>"""
+_DEFAULT_SPRITE_COSTUME = b"""<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+<circle cx="32" cy="32" r="26" fill="#f97316"/>
+<circle cx="24" cy="27" r="4" fill="#111827"/>
+<circle cx="40" cy="27" r="4" fill="#111827"/>
+<path d="M20 42c5 5 19 5 24 0" fill="none" stroke="#111827" stroke-linecap="round" stroke-width="4"/>
+</svg>"""
 
 
 class CodegenError(Sb3VmError):
@@ -258,6 +279,7 @@ def lower_authoring_project(authoring: ScratchProject) -> CgProject:
         name=authoring.name,
         targets=tuple(targets),
         broadcasts=tuple(sorted(broadcasts)),
+        monitors=tuple(_coerce_project_record(monitor) for monitor in authoring.monitors),
         extensions=tuple(authoring.extensions),
         assets=tuple(sorted(authoring.assets.items())),
     )
@@ -708,6 +730,8 @@ def lower_expr(node: ast.AST, context: CompileContext) -> CgExpr:
             raise CodegenError("Lists cannot be used directly as expressions; use explicit list intrinsics/reporters")
         if isinstance(handle, (ScratchConstant, ScratchEnum)):
             return CgExpr("literal", handle.value)
+        if isinstance(handle, (str, int, float, bool)) or handle is None:
+            return CgExpr("literal", handle)
         label = ast.unparse(node)
         raise CodegenError(f"Unknown name in authoring expression: {label}")
     if isinstance(node, ast.BinOp):
@@ -930,6 +954,7 @@ class _BlockEmitter:
         self.list_ids = list_ids
         self.blocks: dict[str, dict[str, Any]] = {}
         self.counter = 0
+        self.top_level_count = 0
 
     def _variable_id(self, name: str) -> str:
         variable_id = self.variable_ids.get((self.target.name, name))
@@ -953,6 +978,11 @@ class _BlockEmitter:
         self.counter += 1
         return f"{self.target.name}:{prefix}:{self.counter}"
 
+    def _top_level_position(self) -> tuple[int, int]:
+        position = (80, 72 + (self.top_level_count * 132))
+        self.top_level_count += 1
+        return position
+
     def emit_scripts(self) -> dict[str, dict[str, Any]]:
         for procedure in self.target.procedures:
             self._emit_procedure(procedure)
@@ -962,6 +992,7 @@ class _BlockEmitter:
 
     def _emit_script(self, script: CgScript) -> None:
         hat_id = self.new_id("hat")
+        x, y = self._top_level_position()
         if script.trigger_kind == "green_flag":
             opcode = "event_whenflagclicked"
             fields: dict[str, Any] = {}
@@ -977,6 +1008,9 @@ class _BlockEmitter:
         elif script.trigger_kind == "clone_start":
             opcode = "control_start_as_clone"
             fields = {}
+        elif script.trigger_kind == "sprite_clicked":
+            opcode = "event_whenthisspriteclicked"
+            fields = {}
         else:
             raise CodegenError(f"Unsupported trigger kind {script.trigger_kind!r}")
         self.blocks[hat_id] = {
@@ -986,6 +1020,8 @@ class _BlockEmitter:
             "inputs": {},
             "fields": fields,
             "topLevel": True,
+            "x": x,
+            "y": y,
         }
         first = self._emit_stmt_chain(script.body, parent=hat_id)
         self.blocks[hat_id]["next"] = first
@@ -993,22 +1029,42 @@ class _BlockEmitter:
     def _emit_procedure(self, procedure: CgProcedure) -> None:
         def_id = self.new_id("procdef")
         proto_id = self.new_id("prototype")
+        x, y = self._top_level_position()
+        prototype_inputs: dict[str, Any] = {}
         self.blocks[def_id] = {
             "opcode": "procedures_definition",
             "next": None,
             "parent": None,
             "inputs": {"custom_block": [1, proto_id]},
             "fields": {},
+            "shadow": False,
             "topLevel": True,
+            "x": x,
+            "y": y,
         }
+        for arg_id, arg_name in zip(procedure.argument_ids, procedure.argument_names):
+            reporter_id = self.new_id("arg")
+            self.blocks[reporter_id] = {
+                "opcode": "argument_reporter_string_number",
+                "next": None,
+                "parent": proto_id,
+                "inputs": {},
+                "fields": {"VALUE": [arg_name, None]},
+                "shadow": True,
+                "topLevel": False,
+            }
+            prototype_inputs[arg_id] = [1, reporter_id]
         self.blocks[proto_id] = {
             "opcode": "procedures_prototype",
             "next": None,
             "parent": def_id,
-            "inputs": {},
+            "inputs": prototype_inputs,
             "fields": {},
+            "shadow": True,
             "topLevel": False,
             "mutation": {
+                "tagName": "mutation",
+                "children": [],
                 "proccode": procedure.proccode,
                 "argumentids": json.dumps(list(procedure.argument_ids)),
                 "argumentnames": json.dumps(list(procedure.argument_names)),
@@ -1213,7 +1269,13 @@ class _BlockEmitter:
             payload["inputs"]["BEATS"] = self._expr_input(stmt.args["beats"], parent=block_id, procedure=procedure)
         elif stmt.kind == "proc_call":
             payload["opcode"] = "procedures_call"
-            payload["mutation"] = {"proccode": stmt.args["proccode"]}
+            payload["mutation"] = {
+                "tagName": "mutation",
+                "children": [],
+                "proccode": stmt.args["proccode"],
+                "argumentids": json.dumps(list(stmt.args["arguments"].keys())),
+                "warp": "false",
+            }
             for arg_id, expr in stmt.args["arguments"].items():
                 payload["inputs"][arg_id] = self._expr_input(expr, parent=block_id, procedure=procedure)
         else:
@@ -1332,6 +1394,7 @@ def emit_project(project: CgProject) -> Project:
     variable_ids: dict[tuple[str, str], str] = {}
     list_ids: dict[tuple[str, str], str] = {}
     broadcasts = {name: f"broadcast:{index}" for index, name in enumerate(project.broadcasts, start=1)}
+    assets = dict(project.assets)
     for target in project.targets:
         for index, (name, _) in enumerate(target.variables, start=1):
             variable_ids[(target.name, name)] = f"var:{target.name}:{index}"
@@ -1342,6 +1405,13 @@ def emit_project(project: CgProject) -> Project:
     for target in project.targets:
         emitter = _BlockEmitter(target, broadcasts=broadcasts, variable_ids=variable_ids, list_ids=list_ids)
         blocks = emitter.emit_scripts()
+        costumes = list(target.costumes)
+        current_costume = target.current_costume
+        if not costumes:
+            default_costume, asset_name, asset_payload = _default_costume_for_target(target, assets)
+            costumes = [default_costume]
+            assets[asset_name] = asset_payload
+            current_costume = 0
         target_json: dict[str, Any] = {
             "isStage": target.is_stage,
             "name": target.name,
@@ -1350,9 +1420,9 @@ def emit_project(project: CgProject) -> Project:
             "broadcasts": broadcasts if target.is_stage else {},
             "blocks": blocks,
             "comments": {},
-            "costumes": list(target.costumes),
+            "costumes": costumes,
             "sounds": list(target.sounds),
-            "currentCostume": target.current_costume,
+            "currentCostume": current_costume,
             "volume": target.volume,
             "layerOrder": target.layer_order,
             "tempo": target.tempo,
@@ -1368,15 +1438,16 @@ def emit_project(project: CgProject) -> Project:
             "rotationStyle": target.rotation_style,
         }
         targets_json.append(target_json)
+    targets_json, assets = _normalize_authored_assets(targets_json, assets)
 
     return Project.from_json(
         {
             "targets": targets_json,
-            "monitors": [],
+            "monitors": [dict(monitor) for monitor in project.monitors],
             "extensions": list(project.extensions),
-            "meta": {"semver": "3.0.0", "vm": project.name},
+            "meta": {"semver": "3.0.0", "vm": _SB3VM_VM_VERSION, "sb3vmProjectName": project.name},
         },
-        assets=dict(project.assets),
+        assets=assets,
     )
 
 
@@ -1392,3 +1463,99 @@ def _literal_payload(value: Any) -> list[Any]:
     if isinstance(value, (int, float)):
         return [4, str(value)]
     return [10, str(value)]
+
+
+def _default_costume_for_target(target: CgTarget, assets: dict[str, bytes]) -> tuple[dict[str, Any], str, bytes]:
+    asset_name = _unique_default_asset_name(target, assets)
+    rotation_center_x = 240 if target.is_stage else 32
+    rotation_center_y = 180 if target.is_stage else 32
+    costume_name = "backdrop1" if target.is_stage else f"{target.name} costume"
+    payload = _DEFAULT_STAGE_COSTUME if target.is_stage else _DEFAULT_SPRITE_COSTUME
+    return (
+        {
+            "name": costume_name,
+            "assetId": Path(asset_name).stem,
+            "dataFormat": "svg",
+            "md5ext": asset_name,
+            "rotationCenterX": rotation_center_x,
+            "rotationCenterY": rotation_center_y,
+            "bitmapResolution": 1,
+        },
+        asset_name,
+        payload,
+    )
+
+
+def _unique_default_asset_name(target: CgTarget, assets: dict[str, bytes]) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", target.name.lower()).strip("-") or ("stage" if target.is_stage else "sprite")
+    prefix = "sb3vm-default-backdrop" if target.is_stage else f"sb3vm-default-costume-{slug}"
+    candidate = f"{prefix}.svg"
+    index = 1
+    while candidate in assets:
+        index += 1
+        candidate = f"{prefix}-{index}.svg"
+    return candidate
+
+
+def _normalize_authored_assets(
+    targets_json: list[dict[str, Any]],
+    assets: dict[str, bytes],
+) -> tuple[list[dict[str, Any]], dict[str, bytes]]:
+    normalized_assets: dict[str, bytes] = {}
+    asset_name_map: dict[str, str] = {}
+
+    def normalize_name(asset_name: str, *, data_format: str | None = None) -> str:
+        mapped = asset_name_map.get(asset_name)
+        if mapped is not None:
+            return mapped
+        payload = assets.get(asset_name)
+        if payload is None:
+            asset_name_map[asset_name] = asset_name
+            return asset_name
+        suffix = _asset_suffix(asset_name, data_format=data_format)
+        digest = hashlib.md5(payload).hexdigest()
+        normalized_name = f"{digest}.{suffix}" if suffix else digest
+        asset_name_map[asset_name] = normalized_name
+        normalized_assets[normalized_name] = payload
+        return normalized_name
+
+    for asset_name, payload in assets.items():
+        normalized_assets[normalize_name(asset_name)] = payload
+
+    for target in targets_json:
+        for field in ("costumes", "sounds"):
+            records = target.get(field)
+            if not isinstance(records, list):
+                continue
+            for record in records:
+                if not isinstance(record, dict):
+                    continue
+                asset_name = _record_asset_name(record)
+                if not asset_name:
+                    continue
+                normalized_name = normalize_name(asset_name, data_format=str(record.get("dataFormat") or ""))
+                digest = normalized_name.split(".", 1)[0]
+                record["assetId"] = digest
+                record["md5ext"] = normalized_name
+    return targets_json, normalized_assets
+
+
+def _record_asset_name(record: dict[str, Any]) -> str:
+    md5ext = record.get("md5ext")
+    if isinstance(md5ext, str) and md5ext.strip():
+        return md5ext.strip()
+    asset_id = record.get("assetId")
+    data_format = record.get("dataFormat")
+    if isinstance(asset_id, str) and asset_id.strip() and isinstance(data_format, str) and data_format.strip():
+        return f"{asset_id.strip()}.{data_format.strip()}"
+    return ""
+
+
+def _asset_suffix(asset_name: str, *, data_format: str | None = None) -> str:
+    if "." in asset_name:
+        suffix = asset_name.rsplit(".", 1)[-1].strip().lower()
+        if suffix:
+            return suffix
+    if data_format:
+        return str(data_format).strip().lower()
+    return ""

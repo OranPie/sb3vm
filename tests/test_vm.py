@@ -50,6 +50,28 @@ def _base_project(blocks_stage=None, blocks_sprite=None):
     }
 
 
+def test_sprite_click_trigger_runs_for_clicked_sprite(tmp_path):
+    sprite_blocks = {
+        "hat": {"opcode": "event_whenthisspriteclicked", "next": "set", "parent": None, "inputs": {}, "fields": {}, "topLevel": True},
+        "set": {
+            "opcode": "data_setvariableto",
+            "next": None,
+            "parent": "hat",
+            "inputs": {"VALUE": [1, [4, "5"]]},
+            "fields": {"VARIABLE": ["score", "v1"]},
+            "topLevel": False,
+        },
+    }
+    path = tmp_path / "sprite_click.sb3"
+    write_sb3(path, _base_project(blocks_sprite=sprite_blocks))
+
+    vm = Sb3Vm(load_sb3(path))
+    vm.emit_sprite_click(vm.state.get_original_instance_id("Sprite1"))
+    vm.step(0.0)
+
+    assert vm.state.stage_variables["score"] == 5.0
+
+
 def _procedure_definition(block_id, prototype_id, next_block, *, proccode, arg_ids, arg_names, defaults, warp=False):
     return {
         block_id: {

@@ -83,7 +83,7 @@ def cmd_run_display(args: argparse.Namespace) -> int:
     info(_LOGGER, "cli.run_display", "running display renderer for %s", args.path)
     project = load_sb3(args.path)
     vm = Sb3Vm(project)
-    renderer = MinimalRenderer(project, vm, scale=args.scale, fps=args.fps)
+    renderer = MinimalRenderer(project, vm, scale=args.scale, fps=args.fps, show_monitors=args.monitors)
     renderer.run(seconds=args.seconds, dt=args.dt)
     return 0
 
@@ -202,6 +202,7 @@ def build_parser() -> argparse.ArgumentParser:
     display_p.add_argument("--dt", type=float, default=1 / 30)
     display_p.add_argument("--fps", type=int, default=30)
     display_p.add_argument("--scale", type=float, default=1.0)
+    display_p.add_argument("--monitors", action="store_true", help="Render visible variable monitors on the display canvas.")
     display_p.set_defaults(func=cmd_run_display)
 
     bench_p = sub.add_parser("benchmark")

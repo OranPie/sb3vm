@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 
 import pytest
 
 from sb3vm.cli import build_parser, cmd_py_build, cmd_py_export, cmd_py_inspect, cmd_py_run, cmd_py_scaffold, cmd_run, cmd_text
 from sb3vm.codegen import CodegenError, build_project, export_project_source, run_authored_project, save_authored_project
 from sb3vm.io.load_sb3 import load_sb3
+from sb3vm.parse.pretty import render_project_text
 from sb3vm.parse.extract_scripts import extract_scripts
 
 
@@ -50,11 +52,21 @@ def on_go():
     )
 
     project = build_project(source)
+    stage_blocks = project.targets[0].blocks
+    procdef = next(block for block in stage_blocks.values() if block.get("opcode") == "procedures_definition")
+    prototype = stage_blocks[procdef["inputs"]["custom_block"][1]]
+    argument_input = prototype["inputs"]["arg:bump:0"][1]
+    argument_reporter = stage_blocks[argument_input]
 
     assert [target.name for target in project.targets] == ["Stage", "Hero"]
     assert "broadcast:1" in project.targets[0].broadcasts.values()
+    assert prototype["opcode"] == "procedures_prototype"
+    assert prototype["shadow"] is True
+    assert argument_reporter["opcode"] == "argument_reporter_string_number"
+    assert argument_reporter["fields"]["VALUE"] == ["amount", None]
     vm_project, vm = run_authored_project(source, seconds=1.0)
-    assert vm_project.to_json()["meta"]["vm"] == "demo"
+    assert vm_project.to_json()["meta"]["vm"] == "0.0.0"
+    assert vm_project.to_json()["meta"]["sb3vmProjectName"] == "demo"
     assert vm.state.stage_variables["score"] == 7.0
     assert vm.state.stage_lists["items"] == ["done"]
     assert vm.state.targets["Stage"].x == 10.0
@@ -105,6 +117,189 @@ def main():
     assert "from sb3vm.codegen.stdlib import CostumeSpec, SoundSpec" in exported
     assert "CostumeSpec(" in exported
     assert vm.state.stage_variables["score"] == 5.0
+
+
+def test_project_stdlib_namespaces_support_extensions_json_and_csv(tmp_path: Path) -> None:
+    source = _write_module(
+        tmp_path / "stdlib_namespaces.py",
+        """
+from sb3vm.codegen import ScratchProject, join
+
+project = ScratchProject("stdlib-namespaces")
+project.stdlib.extensions.pen()
+project.stdlib.extensions.requests_network()
+
+config = project.stdlib.json.loads('{"initial_score": 4, "label": "ok"}')
+payload = project.stdlib.json.dumps({"label": config["label"], "ready": True}, sort_keys=True)
+csv_line = project.stdlib.csv.row("hero", "needs,quotes", 7)
+parsed = project.stdlib.csv.parse_row(csv_line)
+csv_second_value = parsed[1]
+
+stage = project.stage
+score = stage.variable("score", config["initial_score"])
+message = stage.variable("message", "")
+csv_second = stage.variable("csv_second", "")
+
+@stage.when_flag_clicked()
+def main():
+    score = 9
+    message = join(payload, join("|", csv_line))
+    csv_second = csv_second_value
+""",
+    )
+
+    project, vm = run_authored_project(source, seconds=0.5, dt=0.1)
+
+    assert project.extensions == ["pen", "requests"]
+    assert vm.state.stage_variables["score"] == 9.0
+    assert vm.state.stage_variables["message"] == '{"label": "ok", "ready": true}|hero,"needs,quotes",7'
+    assert vm.state.stage_variables["csv_second"] == "needs,quotes"
+
+
+def test_pretty_and_export_use_procedure_display_names_not_internal_ids(tmp_path: Path) -> None:
+    source = _write_module(
+        tmp_path / "pretty_names.py",
+        """
+from sb3vm.codegen import ScratchProject, list_item
+
+project = ScratchProject("pretty-names")
+stage = project.stage
+cur_dir = stage.list("cur_dir", [180, 0, 90, 45, 180, 270])
+next_but = stage.variable("next but", 0)
+
+@stage.procedure(proccode="check next %s", argument_names=("next but",))
+def check(button_index):
+    if list_item(cur_dir, button_index) == 180:
+        next_but = button_index + 5
+""",
+    )
+
+    project = build_project(source)
+    rendered = render_project_text(project)
+    exported = export_project_source(project)
+
+    assert "arg:check:0" not in rendered
+    assert "arg:check:0" not in exported
+    assert "next but" in rendered
+    assert "def proc_stage_check_next(next_but):" in exported
+
+
+def test_when_this_sprite_clicked_authoring_round_trips(tmp_path: Path) -> None:
+    source = _write_module(
+        tmp_path / "sprite_click_authoring.py",
+        """
+from sb3vm.codegen import ScratchProject
+
+project = ScratchProject("sprite-click-authoring")
+stage = project.stage
+hero = project.sprite("Hero")
+score = stage.variable("score", 0)
+
+@hero.when_this_sprite_clicked()
+def on_click():
+    score = 11
+""",
+    )
+
+    project = build_project(source)
+    exported = export_project_source(project)
+    top_level_blocks = [
+        block
+        for target in project.targets
+        for block in target.blocks.values()
+        if block.get("topLevel")
+    ]
+
+    assert any(block.get("opcode") == "event_whenthisspriteclicked" for target in project.targets for block in target.blocks.values())
+    assert all(isinstance(block.get("x"), (int, float)) for block in top_level_blocks)
+    assert all(isinstance(block.get("y"), (int, float)) for block in top_level_blocks)
+    assert ".when_this_sprite_clicked()" in exported
+
+
+def test_build_project_injects_default_costumes_for_targets_without_assets(tmp_path: Path) -> None:
+    source = _write_module(
+        tmp_path / "default_costumes.py",
+        """
+from sb3vm.codegen import ScratchProject
+
+project = ScratchProject("default-costumes")
+stage = project.stage
+hero = project.sprite("Hero")
+score = stage.variable("score", 0)
+
+@stage.when_flag_clicked()
+def main():
+    score = 1
+
+@hero.when_this_sprite_clicked()
+def on_click():
+    score = 2
+""",
+    )
+    output = tmp_path / "default_costumes.sb3"
+
+    built = save_authored_project(source, output)
+    loaded = load_sb3(output)
+
+    assert built.targets[0].costumes
+    assert built.targets[1].costumes
+    assert built.targets[0].current_costume == 0
+    assert built.targets[1].current_costume == 0
+    assert loaded.targets[0].costumes
+    assert loaded.targets[1].costumes
+    assert loaded.targets[0].costumes[0]["dataFormat"] == "svg"
+    assert loaded.targets[1].costumes[0]["dataFormat"] == "svg"
+    assert re.fullmatch(r"[a-f0-9]{32}", loaded.targets[0].costumes[0]["assetId"])
+    assert re.fullmatch(r"[a-f0-9]{32}", loaded.targets[1].costumes[0]["assetId"])
+    assert loaded.targets[0].costumes[0]["md5ext"] in loaded.assets
+    assert loaded.targets[1].costumes[0]["md5ext"] in loaded.assets
+
+
+def test_authoring_monitors_round_trip_in_python(tmp_path: Path) -> None:
+    source = _write_module(
+        tmp_path / "monitors.py",
+        """
+from sb3vm.codegen import MonitorSpec, ScratchProject
+
+project = ScratchProject("monitors")
+stage = project.stage
+hero = project.sprite("Hero")
+score = stage.variable("score", 1)
+energy = hero.variable("energy", 5)
+
+stage.monitor_variable(score, x=12, y=18, label="Scoreboard")
+project.add_monitor(
+    MonitorSpec(
+        id="energy-monitor",
+        opcode="data_variable",
+        params={"VARIABLE": "energy"},
+        sprite_name="Hero",
+        visible=True,
+        x=30,
+        y=42,
+        label="Energy",
+    )
+)
+""",
+    )
+    output = tmp_path / "monitors.sb3"
+
+    project = build_project(source)
+    exported = export_project_source(project)
+    exported_path = _write_module(tmp_path / "monitors_exported.py", exported)
+    rebuilt = build_project(exported_path)
+    save_authored_project(source, output)
+    loaded = load_sb3(output)
+
+    assert len(project.monitors) == 2
+    assert project.monitors[0]["params"]["VARIABLE"] == "score"
+    assert project.monitors[0]["label"] == "Scoreboard"
+    assert project.monitors[1]["spriteName"] == "Hero"
+    assert project.monitors[1]["label"] == "Energy"
+    assert loaded.monitors == project.monitors
+    assert rebuilt.monitors == project.monitors
+    assert "MonitorSpec(" in exported
+    assert "project.add_monitor(" in exported
 
 
 def test_py_build_run_export_inspect_and_scaffold_cli(tmp_path: Path, capsys) -> None:
@@ -258,7 +453,10 @@ def on_backdrop():
     parsed = extract_scripts(project)
     opcodes = {block.get("opcode") for target in project.targets for block in target.blocks.values()}
 
-    assert project.assets["hero.svg"] == b"<svg />"
+    hero_costume = project.targets[1].costumes[0]
+    assert next(iter(project.assets.values())) == b"<svg />"
+    assert re.fullmatch(r"[a-f0-9]{32}", hero_costume["assetId"])
+    assert hero_costume["md5ext"] in project.assets
     assert project.extensions == ["music"]
     assert any(script.trigger.kind == "clone_start" for script in parsed.scripts)
     assert any(script.trigger.kind == "key_pressed" for script in parsed.scripts)

@@ -72,6 +72,7 @@ class Sb3Vm:
         self._clone_start_scripts: dict[str, tuple[Script, ...]] = {}
         self._key_scripts: dict[str, tuple[Script, ...]] = {}
         self._any_key_scripts: tuple[Script, ...] = ()
+        self._sprite_clicked_scripts: dict[str, tuple[Script, ...]] = {}
         self.ir_scripts: dict[str, IrScript] = {
             f"{index}:{script.target_name}:{script.trigger.kind}:{script.trigger.value or ''}": lower_script(
                 script,
@@ -112,6 +113,7 @@ class Sb3Vm:
         clone_start_scripts: dict[str, list[Script]] = {}
         key_scripts: dict[str, list[Script]] = {}
         any_key_scripts: list[Script] = []
+        sprite_clicked_scripts: dict[str, list[Script]] = {}
         for script in self.scripts:
             trigger = script.trigger
             if trigger.kind == "green_flag":
@@ -132,22 +134,27 @@ class Sb3Vm:
                     any_key_scripts.append(script)
                 else:
                     key_scripts.setdefault(normalized, []).append(script)
+                continue
+            if trigger.kind == "sprite_clicked":
+                sprite_clicked_scripts.setdefault(script.target_name, []).append(script)
         self._green_flag_scripts = tuple(green_flag_scripts)
         self._broadcast_scripts = {name: tuple(scripts) for name, scripts in broadcast_scripts.items()}
         self._backdrop_scripts = {name: tuple(scripts) for name, scripts in backdrop_scripts.items()}
         self._clone_start_scripts = {name: tuple(scripts) for name, scripts in clone_start_scripts.items()}
         self._key_scripts = {name: tuple(scripts) for name, scripts in key_scripts.items()}
         self._any_key_scripts = tuple(any_key_scripts)
+        self._sprite_clicked_scripts = {name: tuple(scripts) for name, scripts in sprite_clicked_scripts.items()}
         debug(
             _LOGGER,
             "vm.Sb3Vm._index_scripts",
-            "indexed green=%d broadcasts=%d backdrops=%d clone_targets=%d key_bindings=%d any_key=%d",
+            "indexed green=%d broadcasts=%d backdrops=%d clone_targets=%d key_bindings=%d any_key=%d sprite_click_targets=%d",
             len(self._green_flag_scripts),
             len(self._broadcast_scripts),
             len(self._backdrop_scripts),
             len(self._clone_start_scripts),
             len(self._key_scripts),
             len(self._any_key_scripts),
+            len(self._sprite_clicked_scripts),
         )
 
     def timer_seconds(self) -> float:
@@ -315,6 +322,18 @@ class Sb3Vm:
         if wait_parent is not None:
             wait_parent.waiting_for_children |= child_ids
             wait_parent.wait_reason = f"backdrop:{name}"
+        return child_ids
+
+    def emit_sprite_click(self, instance_id: int) -> set[int]:
+        instance = self.state.instances.get(instance_id)
+        if instance is None or instance.is_stage:
+            return set()
+        child_ids: set[int] = set()
+        for script in self._sprite_clicked_scripts.get(instance.source_target_name, ()):
+            if not script.supported:
+                self.state.unsupported_scripts.extend(script.unsupported_details)
+                continue
+            child_ids.add(self._spawn_script(script, instance_id).id)
         return child_ids
 
     def _spawn_clone_start(self, instance_id: int) -> set[int]:
@@ -639,8 +658,9 @@ class Sb3Vm:
             arg_id: eval_expr(expr, self.state, thread, self)
             for arg_id, expr in arguments.items()
         }
-        for arg_id, default in zip(procedure.argument_ids, procedure.argument_defaults):
+        for arg_id, arg_name, default in zip(procedure.argument_ids, procedure.argument_names, procedure.argument_defaults):
             bound_arguments.setdefault(arg_id, default)
+            bound_arguments.setdefault(arg_name, bound_arguments[arg_id])
         thread.frames.append(
             FrameState(
                 kind="procedure",
