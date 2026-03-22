@@ -62,6 +62,51 @@ def on_go():
     assert vm.state.targets["Hero"].visible is False
 
 
+def test_build_project_from_package_with_relative_imports_and_stdlib_specs(tmp_path: Path) -> None:
+    package_dir = tmp_path / "demo_pkg"
+    package_dir.mkdir()
+    _write_module(
+        package_dir / "shared.py",
+        """
+from sb3vm.codegen import ScratchProject
+from sb3vm.codegen.stdlib import svg_costume
+
+project = ScratchProject("pkg-demo")
+stage = project.stage
+hero = project.sprite("Hero")
+score = stage.variable("score", 0)
+hero.add_costume(svg_costume("hero", "hero.svg"))
+""",
+    )
+    _write_module(
+        package_dir / "__init__.py",
+        """
+from sb3vm.codegen import wait
+from .shared import hero, project, score, stage
+
+@stage.procedure()
+def grow(amount):
+    return amount + 1
+
+@stage.when_flag_clicked()
+def main():
+    score = grow(4)
+    wait(0.1)
+""",
+    )
+
+    project = build_project(package_dir)
+    exported = export_project_source(project)
+    exported_path = _write_module(tmp_path / "pkg_exported.py", exported)
+    rebuilt = build_project(exported_path)
+    _, vm = run_authored_project(exported_path, seconds=0.5, dt=0.1)
+
+    assert any(target.name == "Hero" for target in rebuilt.targets)
+    assert "from sb3vm.codegen.stdlib import CostumeSpec, SoundSpec" in exported
+    assert "CostumeSpec(" in exported
+    assert vm.state.stage_variables["score"] == 5.0
+
+
 def test_py_build_run_export_inspect_and_scaffold_cli(tmp_path: Path, capsys) -> None:
     source = _write_module(
         tmp_path / "authoring_cli.py",
@@ -159,13 +204,14 @@ from sb3vm.codegen import (
     touching_object,
     wait,
 )
+from sb3vm.codegen.stdlib import svg_costume
 
 project = ScratchProject("extended")
 project.extensions.append("music")
 project.add_asset("hero.svg", b"<svg />")
 stage = project.stage
 hero = project.sprite("Hero", visible=False, current_costume=1)
-hero.costumes.append({"name": "hero", "assetId": "hero", "dataFormat": "svg", "md5ext": "hero.svg", "rotationCenterX": 0, "rotationCenterY": 0})
+hero.add_costume(svg_costume("hero", "hero.svg"))
 count = hero.variable("count", 0)
 items = hero.list("items", ["a", "b"])
 
@@ -244,12 +290,13 @@ def test_export_project_source_round_trips_assets_and_clone_scripts(tmp_path: Pa
         tmp_path / "roundtrip_source.py",
         """
 from sb3vm.codegen import MYSELF, ScratchProject, StopTarget, create_clone, delete_this_clone, stop, wait
+from sb3vm.codegen.stdlib import svg_costume
 
 project = ScratchProject("roundtrip")
 project.add_asset("sprite.svg", b"<svg />")
 stage = project.stage
 hero = project.sprite("Hero")
-hero.costumes.append({"name": "hero", "assetId": "sprite", "dataFormat": "svg", "md5ext": "sprite.svg", "rotationCenterX": 0, "rotationCenterY": 0})
+hero.add_costume(svg_costume("hero", "sprite.svg", asset_id="sprite"))
 count = hero.variable("count", 0)
 
 @hero.procedure(proccode="bump %s", argument_names=("amount",), argument_defaults=("1",))
@@ -286,6 +333,48 @@ def clone_main():
     assert any(proc.proccode == "bump %s" for proc in rebuilt_parsed.procedures)
 
 
+def test_returning_procedures_round_trip_without_internal_variables(tmp_path: Path) -> None:
+    source = _write_module(
+        tmp_path / "returns.py",
+        """
+from sb3vm.codegen import ScratchProject
+
+project = ScratchProject("returns")
+stage = project.stage
+value = stage.variable("value", 0)
+other = stage.variable("other", 0)
+
+@stage.procedure()
+def double(n):
+    return n + n
+
+@stage.procedure()
+def bounce(n):
+    return double(n)
+
+@stage.when_flag_clicked()
+def main():
+    value = double(5)
+    other.set(bounce(7))
+""",
+    )
+
+    project = build_project(source)
+    exported = export_project_source(project)
+    exported_path = _write_module(tmp_path / "returns_exported.py", exported)
+    rebuilt = build_project(exported_path)
+    _, vm = run_authored_project(exported_path, seconds=1.0, dt=0.1)
+
+    assert "__sb3vm_internal__" not in exported
+    assert "return (n + n)" in exported
+    assert "return proc_stage_double(n)" in exported
+    assert "value = proc_stage_double(5)" in exported
+    assert "other = proc_stage_bounce(7)" in exported
+    assert any(target.is_stage for target in rebuilt.targets)
+    assert vm.state.stage_variables["value"] == 10.0
+    assert vm.state.stage_variables["other"] == 14.0
+
+
 def test_export_project_source_handles_stage_variable_used_from_sprite(tmp_path: Path) -> None:
     source = _write_module(
         tmp_path / "cross_scope.py",
@@ -313,6 +402,53 @@ def check_highest():
     assert any(name == "Highest" for _, (name, _) in rebuilt_stage.variables.items())
 
 
+def test_variable_list_and_string_sugar_round_trips(tmp_path: Path) -> None:
+    source = _write_module(
+        tmp_path / "sugar.py",
+        """
+from sb3vm.codegen import ScratchProject
+
+project = ScratchProject("sugar")
+stage = project.stage
+text = stage.variable("text", "Ada")
+num = stage.variable("num", -3.7)
+length_value = stage.variable("length_value", 0)
+first = stage.variable("first", "")
+summary = stage.variable("summary", "")
+flag = stage.variable("flag", "")
+items = stage.list("items", ["A"])
+
+@stage.when_flag_clicked()
+def main():
+    text.set(text.join("!"))
+    first.set(text.letter(1))
+    length_value.set(text.length())
+    summary.set(items.text())
+    items.push(text.letter(2))
+    if items.has("d"):
+        items.remove(1)
+    flag.set(text.contains("A"))
+    num.set(num.rounded())
+    num.set(num.math("abs"))
+""",
+    )
+
+    project = build_project(source)
+    exported = export_project_source(project)
+    exported_path = _write_module(tmp_path / "sugar_exported.py", exported)
+    rebuilt = build_project(exported_path)
+
+    assert "text.join(" in exported
+    assert "text.letter(" in exported
+    assert "text.length()" in exported
+    assert "items.text()" in exported
+    assert "items.push(" in exported
+    assert "items.has(" in exported
+    assert "num.rounded()" in exported
+    assert "num.math('abs')" in exported
+    assert any(target.is_stage for target in rebuilt.targets)
+
+
 def test_export_example_project_uses_sugar_constants_and_round_trips(tmp_path: Path) -> None:
     source = export_project_source(load_sb3(Path("test.sb3")))
     exported_path = _write_module(tmp_path / "test_exported.py", source)
@@ -320,10 +456,12 @@ def test_export_example_project_uses_sugar_constants_and_round_trips(tmp_path: P
 
     assert ".create_clone(MYSELF)" in source
     assert ".touching_object(MOUSE_POINTER)" in source
-    assert ".append(" in source
-    assert ".item(" in source
+    assert ".push(" in source
+    assert ".at(" in source
     assert ".add_costume(" in source
     assert ".add_sound(" in source
+    assert "CostumeSpec(" in source
+    assert "SoundSpec(" in source
     assert ".costumes.extend(" not in source
     assert ".sounds.extend(" not in source
     assert "GraphicEffect." in source

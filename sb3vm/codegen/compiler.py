@@ -4,13 +4,22 @@ import ast
 import importlib.util
 import inspect
 import json
+import sys
 import textwrap
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import ModuleType
 from typing import Any
 
-from sb3vm.codegen.api import ListHandle, ProcedureBinding, ScratchConstant, ScratchEnum, ScratchProject, TargetBuilder, VariableHandle
+from sb3vm.codegen.api import (
+    ListHandle,
+    ProcedureBinding,
+    ScratchConstant,
+    ScratchEnum,
+    ScratchProject,
+    TargetBuilder,
+    VariableHandle,
+)
 from sb3vm.codegen.ir import CgExpr, CgProcedure, CgProject, CgScript, CgStmt, CgTarget
 from sb3vm.io.save_sb3 import save_sb3
 from sb3vm.log import debug, error, get_logger, info
@@ -44,16 +53,73 @@ def _resolve_static_object(node: ast.AST, context: CompileContext) -> Any:
     return _MISSING
 
 
+def _resolve_authoring_source(path: str | Path) -> Path:
+    source_path = Path(path).resolve()
+    if source_path.is_dir():
+        source_path = source_path / "__init__.py"
+    if not source_path.exists() or source_path.suffix != ".py":
+        raise CodegenError(f"Authoring source must be a Python module or package: {path}")
+    return source_path
+
+
+def _authoring_import_context(source_path: Path) -> tuple[str, Path, bool]:
+    if source_path.name == "__init__.py":
+        module_parts = [source_path.parent.name]
+        cursor = source_path.parent.parent
+        is_package = True
+    else:
+        module_parts = [source_path.stem]
+        cursor = source_path.parent
+        is_package = False
+    while (cursor / "__init__.py").exists():
+        module_parts.insert(0, cursor.name)
+        cursor = cursor.parent
+    module_name = ".".join(module_parts)
+    if not is_package and len(module_parts) == 1:
+        module_name = f"sb3vm_codegen_{source_path.stem}_{abs(hash(source_path))}"
+    return module_name, cursor, is_package
+
+
+def _purge_authoring_modules(module_name: str, sys_path_root: Path) -> None:
+    top_level = module_name.split(".", 1)[0]
+    for loaded_name, module in list(sys.modules.items()):
+        if loaded_name != top_level and not loaded_name.startswith(f"{top_level}."):
+            continue
+        module_file = getattr(module, "__file__", None)
+        if module_file is None:
+            continue
+        try:
+            module_path = Path(module_file).resolve()
+        except OSError:
+            continue
+        if module_path == sys_path_root or sys_path_root in module_path.parents:
+            sys.modules.pop(loaded_name, None)
+
+
 def load_authoring_module(path: str | Path) -> ModuleType:
-    source_path = Path(path)
-    info(_LOGGER, "codegen.load_authoring_module", "loading authoring module %s", source_path)
-    module_name = f"sb3vm_codegen_{source_path.stem}_{abs(hash(source_path.resolve()))}"
-    spec = importlib.util.spec_from_file_location(module_name, source_path)
+    source_path = _resolve_authoring_source(path)
+    module_name, sys_path_root, is_package = _authoring_import_context(source_path)
+    info(_LOGGER, "codegen.load_authoring_module", "loading authoring module %s as %s", source_path, module_name)
+    _purge_authoring_modules(module_name, sys_path_root)
+    spec = importlib.util.spec_from_file_location(
+        module_name,
+        source_path,
+        submodule_search_locations=[str(source_path.parent)] if is_package else None,
+    )
     if spec is None or spec.loader is None:
         error(_LOGGER, "codegen.load_authoring_module", "unable to create import spec for %s", source_path)
         raise CodegenError(f"Unable to load authoring module: {source_path}")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    sys.path.insert(0, str(sys_path_root))
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(module_name, None)
+        raise
+    finally:
+        if sys.path and sys.path[0] == str(sys_path_root):
+            sys.path.pop(0)
     debug(_LOGGER, "codegen.load_authoring_module", "loaded module %s from %s", module_name, source_path)
     return module
 
@@ -104,6 +170,8 @@ class CompileContext:
     project: ScratchProject
     parameters: tuple[str, ...] = ()
     parameter_display_names: dict[str, str] = field(default_factory=dict)
+    current_procedure_name: str | None = None
+    current_return_variable: str | None = None
 
 
 def lower_authoring_project(authoring: ScratchProject) -> CgProject:
@@ -114,6 +182,13 @@ def lower_authoring_project(authoring: ScratchProject) -> CgProject:
         scripts: list[CgScript] = []
         procedures: list[CgProcedure] = []
         proc_bindings = dict(target.procedures)
+        for name, binding in proc_bindings.items():
+            fn_node = get_function_ast(binding.function)
+            returns_value = _block_may_return(fn_node.body)
+            _validate_return_usage(fn_node.body)
+            binding.returns_value = returns_value
+            if returns_value and binding.return_variable is None:
+                binding.return_variable = target.internal_variable("return", default="", hint=name).name
         for binding in target.scripts:
             body = lower_function(binding.function, target, authoring, parameters=(), procedures=proc_bindings)
             scripts.append(
@@ -138,6 +213,8 @@ def lower_authoring_project(authoring: ScratchProject) -> CgProject:
                 parameters=python_argument_names,
                 procedures=proc_bindings,
                 parameter_display_names=dict(zip(python_argument_names, argument_names)),
+                current_procedure_name=name,
+                current_return_variable=binding.return_variable,
             )
             procedures.append(
                 CgProcedure(
@@ -197,6 +274,44 @@ def get_function_ast(fn: Any) -> ast.FunctionDef:
     return node
 
 
+def _filtered_statements(body: list[ast.stmt]) -> list[ast.stmt]:
+    return [stmt for stmt in body if not isinstance(stmt, ast.Pass)]
+
+
+def _stmt_may_return(node: ast.stmt) -> bool:
+    if isinstance(node, ast.Return):
+        return True
+    if isinstance(node, ast.If):
+        return _block_may_return(node.body) or _block_may_return(node.orelse)
+    if isinstance(node, (ast.For, ast.While)):
+        return _block_may_return(node.body) or _block_may_return(node.orelse)
+    return False
+
+
+def _block_may_return(body: list[ast.stmt]) -> bool:
+    return any(_stmt_may_return(stmt) for stmt in _filtered_statements(body))
+
+
+def _validate_return_usage(body: list[ast.stmt], *, inside_loop: bool = False) -> None:
+    filtered = _filtered_statements(body)
+    for index, node in enumerate(filtered):
+        if isinstance(node, ast.Return):
+            if inside_loop:
+                raise CodegenError("Return statements are not supported inside loops in v1")
+            if index != len(filtered) - 1:
+                raise CodegenError("Return statements must be the final statement in their block")
+            continue
+        if _stmt_may_return(node) and index != len(filtered) - 1:
+            raise CodegenError("Blocks that may return must be the final statement in their block")
+        if isinstance(node, ast.If):
+            _validate_return_usage(node.body, inside_loop=inside_loop)
+            _validate_return_usage(node.orelse, inside_loop=inside_loop)
+            continue
+        if isinstance(node, (ast.For, ast.While)):
+            if _block_may_return(node.body) or _block_may_return(node.orelse):
+                raise CodegenError("Return statements are not supported inside loops in v1")
+
+
 def lower_function(
     fn: Any,
     target: TargetBuilder,
@@ -205,6 +320,8 @@ def lower_function(
     parameters: tuple[str, ...],
     procedures: dict[str, ProcedureBinding],
     parameter_display_names: dict[str, str] | None = None,
+    current_procedure_name: str | None = None,
+    current_return_variable: str | None = None,
 ) -> list[CgStmt]:
     fn_node = get_function_ast(fn)
     context = CompileContext(
@@ -214,6 +331,8 @@ def lower_function(
         procedures=procedures,
         parameters=parameters,
         parameter_display_names=dict(parameter_display_names or {}),
+        current_procedure_name=current_procedure_name,
+        current_return_variable=current_return_variable,
     )
     return [stmt for node in fn_node.body for stmt in lower_stmt(node, context)]
 
@@ -238,6 +357,9 @@ def lower_stmt(node: ast.stmt, context: CompileContext) -> list[CgStmt]:
             raise CodegenError("Only simple assignment to declared Scratch variables is supported")
         target_name = node.targets[0].id
         handle = _resolve_variable(target_name, context)
+        direct_return = _lower_assignment_from_returning_call(handle.name, node.value, context)
+        if direct_return is not None:
+            return direct_return
         return [CgStmt("set_var", {"name": handle.name, "value": lower_expr(node.value, context)})]
     if isinstance(node, ast.AugAssign):
         if not isinstance(node.target, ast.Name):
@@ -247,7 +369,7 @@ def lower_stmt(node: ast.stmt, context: CompileContext) -> list[CgStmt]:
             raise CodegenError("Only += is supported for Scratch variable augmented assignment")
         return [CgStmt("change_var", {"name": handle.name, "value": lower_expr(node.value, context)})]
     if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
-        return [lower_call_stmt(node.value, context)]
+        return lower_call_stmt(node.value, context)
     if isinstance(node, ast.If):
         kind = "if_else" if node.orelse else "if"
         stmt = CgStmt(
@@ -290,229 +412,242 @@ def lower_stmt(node: ast.stmt, context: CompileContext) -> list[CgStmt]:
         ]
     if isinstance(node, ast.Return):
         if node.value is not None:
-            raise CodegenError("Scratch procedures do not support return values")
+            if context.current_return_variable is None:
+                raise CodegenError("Return values are only supported inside Scratch procedures")
+            direct_return = _lower_assignment_from_returning_call(context.current_return_variable, node.value, context)
+            if direct_return is not None:
+                return direct_return
+            return [CgStmt("set_var", {"name": context.current_return_variable, "value": lower_expr(node.value, context)})]
         return []
     if isinstance(node, ast.Pass):
         return []
     raise CodegenError(f"Unsupported statement syntax: {node.__class__.__name__}")
 
 
-def lower_call_stmt(node: ast.Call, context: CompileContext) -> CgStmt:
+def lower_call_stmt(node: ast.Call, context: CompileContext) -> list[CgStmt]:
     method = _resolve_method_receiver(node.func, context)
     if method is not None:
         receiver, name = method
         if isinstance(receiver, VariableHandle):
             if name == "set" and len(node.args) == 1:
-                return CgStmt("set_var", {"name": receiver.name, "value": lower_expr(node.args[0], context)})
+                direct_return = _lower_assignment_from_returning_call(receiver.name, node.args[0], context)
+                if direct_return is not None:
+                    return direct_return
+            if name == "set" and len(node.args) == 1:
+                return [CgStmt("set_var", {"name": receiver.name, "value": lower_expr(node.args[0], context)})]
             if name == "change" and len(node.args) == 1:
-                return CgStmt("change_var", {"name": receiver.name, "value": lower_expr(node.args[0], context)})
+                return [CgStmt("change_var", {"name": receiver.name, "value": lower_expr(node.args[0], context)})]
         if isinstance(receiver, ListHandle):
             if name == "append" and len(node.args) == 1:
-                return CgStmt("list_add", {"name": receiver.name, "item": lower_expr(node.args[0], context)})
+                return [CgStmt("list_add", {"name": receiver.name, "item": lower_expr(node.args[0], context)})]
+            if name == "push" and len(node.args) == 1:
+                return [CgStmt("list_add", {"name": receiver.name, "item": lower_expr(node.args[0], context)})]
             if name == "delete" and len(node.args) == 1:
-                return CgStmt("list_delete", {"name": receiver.name, "index": lower_expr(node.args[0], context)})
+                return [CgStmt("list_delete", {"name": receiver.name, "index": lower_expr(node.args[0], context)})]
+            if name == "remove" and len(node.args) == 1:
+                return [CgStmt("list_delete", {"name": receiver.name, "index": lower_expr(node.args[0], context)})]
             if name == "clear" and not node.args:
-                return CgStmt("list_delete_all", {"name": receiver.name})
+                return [CgStmt("list_delete_all", {"name": receiver.name})]
             if name == "insert" and len(node.args) == 2:
-                return CgStmt("list_insert", {"name": receiver.name, "index": lower_expr(node.args[0], context), "item": lower_expr(node.args[1], context)})
+                return [CgStmt("list_insert", {"name": receiver.name, "index": lower_expr(node.args[0], context), "item": lower_expr(node.args[1], context)})]
             if name == "replace" and len(node.args) == 2:
-                return CgStmt("list_replace", {"name": receiver.name, "index": lower_expr(node.args[0], context), "item": lower_expr(node.args[1], context)})
+                return [CgStmt("list_replace", {"name": receiver.name, "index": lower_expr(node.args[0], context), "item": lower_expr(node.args[1], context)})]
         if isinstance(receiver, TargetBuilder):
             _require_current_target_receiver(receiver, context)
             if name == "wait" and len(node.args) == 1:
-                return CgStmt("wait", {"duration": lower_expr(node.args[0], context)})
+                return [CgStmt("wait", {"duration": lower_expr(node.args[0], context)})]
             if name == "broadcast" and len(node.args) == 1:
                 literal = _require_string_literal(node.args[0], context)
                 context.project.register_broadcast(literal)
-                return CgStmt("broadcast", {"name": literal, "wait": False})
+                return [CgStmt("broadcast", {"name": literal, "wait": False})]
             if name == "broadcast_wait" and len(node.args) == 1:
                 literal = _require_string_literal(node.args[0], context)
                 context.project.register_broadcast(literal)
-                return CgStmt("broadcast", {"name": literal, "wait": True})
+                return [CgStmt("broadcast", {"name": literal, "wait": True})]
             if name == "goto_xy" and len(node.args) == 2:
-                return CgStmt("move_state", {"mode": "goto_xy", "x": lower_expr(node.args[0], context), "y": lower_expr(node.args[1], context)})
+                return [CgStmt("move_state", {"mode": "goto_xy", "x": lower_expr(node.args[0], context), "y": lower_expr(node.args[1], context)})]
             if name == "goto_target" and len(node.args) == 1:
-                return CgStmt("move_state", {"mode": "goto_target", "target": lower_expr(node.args[0], context)})
+                return [CgStmt("move_state", {"mode": "goto_target", "target": lower_expr(node.args[0], context)})]
             if name == "glide_xy" and len(node.args) == 3:
-                return CgStmt("move_state", {"mode": "glide_xy", "duration": lower_expr(node.args[0], context), "x": lower_expr(node.args[1], context), "y": lower_expr(node.args[2], context)})
+                return [CgStmt("move_state", {"mode": "glide_xy", "duration": lower_expr(node.args[0], context), "x": lower_expr(node.args[1], context), "y": lower_expr(node.args[2], context)})]
             if name == "glide_to" and len(node.args) == 2:
-                return CgStmt("move_state", {"mode": "glide_target", "duration": lower_expr(node.args[0], context), "target": lower_expr(node.args[1], context)})
+                return [CgStmt("move_state", {"mode": "glide_target", "duration": lower_expr(node.args[0], context), "target": lower_expr(node.args[1], context)})]
             if name == "set_x" and len(node.args) == 1:
-                return CgStmt("move_state", {"mode": "set_x", "x": lower_expr(node.args[0], context)})
+                return [CgStmt("move_state", {"mode": "set_x", "x": lower_expr(node.args[0], context)})]
             if name == "set_y" and len(node.args) == 1:
-                return CgStmt("move_state", {"mode": "set_y", "y": lower_expr(node.args[0], context)})
+                return [CgStmt("move_state", {"mode": "set_y", "y": lower_expr(node.args[0], context)})]
             if name == "change_x_by" and len(node.args) == 1:
-                return CgStmt("move_state", {"mode": "change_x", "dx": lower_expr(node.args[0], context)})
+                return [CgStmt("move_state", {"mode": "change_x", "dx": lower_expr(node.args[0], context)})]
             if name == "change_y_by" and len(node.args) == 1:
-                return CgStmt("move_state", {"mode": "change_y", "dy": lower_expr(node.args[0], context)})
+                return [CgStmt("move_state", {"mode": "change_y", "dy": lower_expr(node.args[0], context)})]
             if name == "turn_right" and len(node.args) == 1:
-                return CgStmt("move_state", {"mode": "turn_right", "degrees": lower_expr(node.args[0], context)})
+                return [CgStmt("move_state", {"mode": "turn_right", "degrees": lower_expr(node.args[0], context)})]
             if name == "turn_left" and len(node.args) == 1:
-                return CgStmt("move_state", {"mode": "turn_left", "degrees": lower_expr(node.args[0], context)})
+                return [CgStmt("move_state", {"mode": "turn_left", "degrees": lower_expr(node.args[0], context)})]
             if name == "point_in_direction" and len(node.args) == 1:
-                return CgStmt("move_state", {"mode": "point_direction", "direction": lower_expr(node.args[0], context)})
+                return [CgStmt("move_state", {"mode": "point_direction", "direction": lower_expr(node.args[0], context)})]
             if name == "point_towards" and len(node.args) == 1:
-                return CgStmt("move_state", {"mode": "point_towards", "target": lower_expr(node.args[0], context)})
+                return [CgStmt("move_state", {"mode": "point_towards", "target": lower_expr(node.args[0], context)})]
             if name == "set_rotation_style" and len(node.args) == 1:
-                return CgStmt("move_state", {"mode": "set_rotation_style", "style": _require_string_literal(node.args[0], context)})
+                return [CgStmt("move_state", {"mode": "set_rotation_style", "style": _require_string_literal(node.args[0], context)})]
             if name == "hide" and not node.args:
-                return CgStmt("looks_state", {"mode": "hide"})
+                return [CgStmt("looks_state", {"mode": "hide"})]
             if name == "show" and not node.args:
-                return CgStmt("looks_state", {"mode": "show"})
+                return [CgStmt("looks_state", {"mode": "show"})]
             if name == "say" and len(node.args) == 1:
-                return CgStmt("looks_state", {"mode": "dialogue", "style": "say", "message": lower_expr(node.args[0], context)})
+                return [CgStmt("looks_state", {"mode": "dialogue", "style": "say", "message": lower_expr(node.args[0], context)})]
             if name == "say_for_secs" and len(node.args) == 2:
-                return CgStmt("looks_state", {"mode": "dialogue", "style": "say", "message": lower_expr(node.args[0], context), "duration": lower_expr(node.args[1], context)})
+                return [CgStmt("looks_state", {"mode": "dialogue", "style": "say", "message": lower_expr(node.args[0], context), "duration": lower_expr(node.args[1], context)})]
             if name == "think" and len(node.args) == 1:
-                return CgStmt("looks_state", {"mode": "dialogue", "style": "think", "message": lower_expr(node.args[0], context)})
+                return [CgStmt("looks_state", {"mode": "dialogue", "style": "think", "message": lower_expr(node.args[0], context)})]
             if name == "think_for_secs" and len(node.args) == 2:
-                return CgStmt("looks_state", {"mode": "dialogue", "style": "think", "message": lower_expr(node.args[0], context), "duration": lower_expr(node.args[1], context)})
+                return [CgStmt("looks_state", {"mode": "dialogue", "style": "think", "message": lower_expr(node.args[0], context), "duration": lower_expr(node.args[1], context)})]
             if name == "switch_costume" and len(node.args) == 1:
-                return CgStmt("looks_state", {"mode": "switch_costume", "costume": lower_expr(node.args[0], context)})
+                return [CgStmt("looks_state", {"mode": "switch_costume", "costume": lower_expr(node.args[0], context)})]
             if name == "next_costume" and not node.args:
-                return CgStmt("looks_state", {"mode": "next_costume"})
+                return [CgStmt("looks_state", {"mode": "next_costume"})]
             if name == "switch_backdrop" and len(node.args) == 1:
-                return CgStmt("looks_state", {"mode": "switch_backdrop", "backdrop": lower_expr(node.args[0], context), "wait": False})
+                return [CgStmt("looks_state", {"mode": "switch_backdrop", "backdrop": lower_expr(node.args[0], context), "wait": False})]
             if name == "switch_backdrop_wait" and len(node.args) == 1:
-                return CgStmt("looks_state", {"mode": "switch_backdrop", "backdrop": lower_expr(node.args[0], context), "wait": True})
+                return [CgStmt("looks_state", {"mode": "switch_backdrop", "backdrop": lower_expr(node.args[0], context), "wait": True})]
             if name == "next_backdrop" and not node.args:
-                return CgStmt("looks_state", {"mode": "next_backdrop"})
+                return [CgStmt("looks_state", {"mode": "next_backdrop"})]
             if name == "set_size" and len(node.args) == 1:
-                return CgStmt("looks_state", {"mode": "set_size", "size": lower_expr(node.args[0], context)})
+                return [CgStmt("looks_state", {"mode": "set_size", "size": lower_expr(node.args[0], context)})]
             if name == "change_size_by" and len(node.args) == 1:
-                return CgStmt("looks_state", {"mode": "change_size", "delta": lower_expr(node.args[0], context)})
+                return [CgStmt("looks_state", {"mode": "change_size", "delta": lower_expr(node.args[0], context)})]
             if name == "set_effect" and len(node.args) == 2:
-                return CgStmt("looks_state", {"mode": "set_effect", "effect": _require_string_literal(node.args[0], context), "value": lower_expr(node.args[1], context)})
+                return [CgStmt("looks_state", {"mode": "set_effect", "effect": _require_string_literal(node.args[0], context), "value": lower_expr(node.args[1], context)})]
             if name == "change_effect_by" and len(node.args) == 2:
-                return CgStmt("looks_state", {"mode": "change_effect", "effect": _require_string_literal(node.args[0], context), "value": lower_expr(node.args[1], context)})
+                return [CgStmt("looks_state", {"mode": "change_effect", "effect": _require_string_literal(node.args[0], context), "value": lower_expr(node.args[1], context)})]
             if name == "clear_graphic_effects" and not node.args:
-                return CgStmt("looks_state", {"mode": "clear_effects"})
+                return [CgStmt("looks_state", {"mode": "clear_effects"})]
             if name == "go_front_back" and len(node.args) == 1:
-                return CgStmt("looks_state", {"mode": "go_front_back", "direction": _require_string_literal(node.args[0], context)})
+                return [CgStmt("looks_state", {"mode": "go_front_back", "direction": _require_string_literal(node.args[0], context)})]
             if name == "go_layers" and len(node.args) == 2:
-                return CgStmt("looks_state", {"mode": "go_layers", "direction": _require_string_literal(node.args[0], context), "layers": lower_expr(node.args[1], context)})
+                return [CgStmt("looks_state", {"mode": "go_layers", "direction": _require_string_literal(node.args[0], context), "layers": lower_expr(node.args[1], context)})]
             if name == "create_clone" and len(node.args) == 1:
-                return CgStmt("create_clone", {"selector": lower_expr(node.args[0], context)})
+                return [CgStmt("create_clone", {"selector": lower_expr(node.args[0], context)})]
             if name == "delete_this_clone" and not node.args:
-                return CgStmt("delete_clone", {})
+                return [CgStmt("delete_clone", {})]
             if name == "ask" and len(node.args) == 1:
-                return CgStmt("ask", {"prompt": lower_expr(node.args[0], context)})
+                return [CgStmt("ask", {"prompt": lower_expr(node.args[0], context)})]
             if name == "reset_timer" and not node.args:
-                return CgStmt("reset_timer", {})
+                return [CgStmt("reset_timer", {})]
             if name == "play_note_for_beats" and len(node.args) == 2:
-                return CgStmt("music_play_note", {"note": lower_expr(node.args[0], context), "beats": lower_expr(node.args[1], context)})
+                return [CgStmt("music_play_note", {"note": lower_expr(node.args[0], context), "beats": lower_expr(node.args[1], context)})]
             if name == "stop" and len(node.args) == 1:
-                return CgStmt("stop", {"mode": _require_string_literal(node.args[0], context)})
+                return [CgStmt("stop", {"mode": _require_string_literal(node.args[0], context)})]
         raise CodegenError(f"Unsupported method call in authoring bodies: {ast.unparse(node.func)}")
     if not isinstance(node.func, ast.Name):
         raise CodegenError("Only direct function calls are supported in authoring bodies")
     name = node.func.id
     if name == "add_to_list" and len(node.args) == 2:
         handle = _require_list_handle(node.args[0], context)
-        return CgStmt("list_add", {"name": handle.name, "item": lower_expr(node.args[1], context)})
+        return [CgStmt("list_add", {"name": handle.name, "item": lower_expr(node.args[1], context)})]
     if name == "delete_from_list" and len(node.args) == 2:
         handle = _require_list_handle(node.args[0], context)
-        return CgStmt("list_delete", {"name": handle.name, "index": lower_expr(node.args[1], context)})
+        return [CgStmt("list_delete", {"name": handle.name, "index": lower_expr(node.args[1], context)})]
     if name == "delete_all_of_list" and len(node.args) == 1:
         handle = _require_list_handle(node.args[0], context)
-        return CgStmt("list_delete_all", {"name": handle.name})
+        return [CgStmt("list_delete_all", {"name": handle.name})]
     if name == "insert_at_list" and len(node.args) == 3:
         handle = _require_list_handle(node.args[0], context)
-        return CgStmt(
+        return [CgStmt(
             "list_insert",
             {"name": handle.name, "index": lower_expr(node.args[1], context), "item": lower_expr(node.args[2], context)},
-        )
+        )]
     if name == "replace_in_list" and len(node.args) == 3:
         handle = _require_list_handle(node.args[0], context)
-        return CgStmt(
+        return [CgStmt(
             "list_replace",
             {"name": handle.name, "index": lower_expr(node.args[1], context), "item": lower_expr(node.args[2], context)},
-        )
+        )]
     args = [lower_expr(arg, context) for arg in node.args]
     if name == "wait" and len(args) == 1:
-        return CgStmt("wait", {"duration": args[0]})
+        return [CgStmt("wait", {"duration": args[0]})]
     if name == "broadcast" and len(args) == 1:
         literal = _require_string_literal(node.args[0], context)
         context.project.register_broadcast(literal)
-        return CgStmt("broadcast", {"name": literal, "wait": False})
+        return [CgStmt("broadcast", {"name": literal, "wait": False})]
     if name == "broadcast_wait" and len(args) == 1:
         literal = _require_string_literal(node.args[0], context)
         context.project.register_broadcast(literal)
-        return CgStmt("broadcast", {"name": literal, "wait": True})
+        return [CgStmt("broadcast", {"name": literal, "wait": True})]
     if name == "goto_xy" and len(args) == 2:
-        return CgStmt("move_state", {"mode": "goto_xy", "x": args[0], "y": args[1]})
+        return [CgStmt("move_state", {"mode": "goto_xy", "x": args[0], "y": args[1]})]
     if name == "goto_target" and len(args) == 1:
-        return CgStmt("move_state", {"mode": "goto_target", "target": args[0]})
+        return [CgStmt("move_state", {"mode": "goto_target", "target": args[0]})]
     if name == "glide_xy" and len(args) == 3:
-        return CgStmt("move_state", {"mode": "glide_xy", "duration": args[0], "x": args[1], "y": args[2]})
+        return [CgStmt("move_state", {"mode": "glide_xy", "duration": args[0], "x": args[1], "y": args[2]})]
     if name == "glide_to" and len(args) == 2:
-        return CgStmt("move_state", {"mode": "glide_target", "duration": args[0], "target": args[1]})
+        return [CgStmt("move_state", {"mode": "glide_target", "duration": args[0], "target": args[1]})]
     if name == "set_x" and len(args) == 1:
-        return CgStmt("move_state", {"mode": "set_x", "x": args[0]})
+        return [CgStmt("move_state", {"mode": "set_x", "x": args[0]})]
     if name == "set_y" and len(args) == 1:
-        return CgStmt("move_state", {"mode": "set_y", "y": args[0]})
+        return [CgStmt("move_state", {"mode": "set_y", "y": args[0]})]
     if name == "change_x_by" and len(args) == 1:
-        return CgStmt("move_state", {"mode": "change_x", "dx": args[0]})
+        return [CgStmt("move_state", {"mode": "change_x", "dx": args[0]})]
     if name == "change_y_by" and len(args) == 1:
-        return CgStmt("move_state", {"mode": "change_y", "dy": args[0]})
+        return [CgStmt("move_state", {"mode": "change_y", "dy": args[0]})]
     if name == "turn_right" and len(args) == 1:
-        return CgStmt("move_state", {"mode": "turn_right", "degrees": args[0]})
+        return [CgStmt("move_state", {"mode": "turn_right", "degrees": args[0]})]
     if name == "turn_left" and len(args) == 1:
-        return CgStmt("move_state", {"mode": "turn_left", "degrees": args[0]})
+        return [CgStmt("move_state", {"mode": "turn_left", "degrees": args[0]})]
     if name == "point_in_direction" and len(args) == 1:
-        return CgStmt("move_state", {"mode": "point_direction", "direction": args[0]})
+        return [CgStmt("move_state", {"mode": "point_direction", "direction": args[0]})]
     if name == "point_towards" and len(args) == 1:
-        return CgStmt("move_state", {"mode": "point_towards", "target": args[0]})
+        return [CgStmt("move_state", {"mode": "point_towards", "target": args[0]})]
     if name == "set_rotation_style" and len(node.args) == 1:
-        return CgStmt("move_state", {"mode": "set_rotation_style", "style": _require_string_literal(node.args[0], context)})
+        return [CgStmt("move_state", {"mode": "set_rotation_style", "style": _require_string_literal(node.args[0], context)})]
     if name == "hide" and not args:
-        return CgStmt("looks_state", {"mode": "hide"})
+        return [CgStmt("looks_state", {"mode": "hide"})]
     if name == "show" and not args:
-        return CgStmt("looks_state", {"mode": "show"})
+        return [CgStmt("looks_state", {"mode": "show"})]
     if name == "say" and len(args) == 1:
-        return CgStmt("looks_state", {"mode": "dialogue", "style": "say", "message": args[0]})
+        return [CgStmt("looks_state", {"mode": "dialogue", "style": "say", "message": args[0]})]
     if name == "say_for_secs" and len(args) == 2:
-        return CgStmt("looks_state", {"mode": "dialogue", "style": "say", "message": args[0], "duration": args[1]})
+        return [CgStmt("looks_state", {"mode": "dialogue", "style": "say", "message": args[0], "duration": args[1]})]
     if name == "think" and len(args) == 1:
-        return CgStmt("looks_state", {"mode": "dialogue", "style": "think", "message": args[0]})
+        return [CgStmt("looks_state", {"mode": "dialogue", "style": "think", "message": args[0]})]
     if name == "think_for_secs" and len(args) == 2:
-        return CgStmt("looks_state", {"mode": "dialogue", "style": "think", "message": args[0], "duration": args[1]})
+        return [CgStmt("looks_state", {"mode": "dialogue", "style": "think", "message": args[0], "duration": args[1]})]
     if name == "switch_costume" and len(args) == 1:
-        return CgStmt("looks_state", {"mode": "switch_costume", "costume": args[0]})
+        return [CgStmt("looks_state", {"mode": "switch_costume", "costume": args[0]})]
     if name == "next_costume" and not args:
-        return CgStmt("looks_state", {"mode": "next_costume"})
+        return [CgStmt("looks_state", {"mode": "next_costume"})]
     if name == "switch_backdrop" and len(args) == 1:
-        return CgStmt("looks_state", {"mode": "switch_backdrop", "backdrop": args[0], "wait": False})
+        return [CgStmt("looks_state", {"mode": "switch_backdrop", "backdrop": args[0], "wait": False})]
     if name == "switch_backdrop_wait" and len(args) == 1:
-        return CgStmt("looks_state", {"mode": "switch_backdrop", "backdrop": args[0], "wait": True})
+        return [CgStmt("looks_state", {"mode": "switch_backdrop", "backdrop": args[0], "wait": True})]
     if name == "next_backdrop" and not args:
-        return CgStmt("looks_state", {"mode": "next_backdrop"})
+        return [CgStmt("looks_state", {"mode": "next_backdrop"})]
     if name == "set_size" and len(args) == 1:
-        return CgStmt("looks_state", {"mode": "set_size", "size": args[0]})
+        return [CgStmt("looks_state", {"mode": "set_size", "size": args[0]})]
     if name == "change_size_by" and len(args) == 1:
-        return CgStmt("looks_state", {"mode": "change_size", "delta": args[0]})
+        return [CgStmt("looks_state", {"mode": "change_size", "delta": args[0]})]
     if name == "set_effect" and len(args) == 2:
-        return CgStmt("looks_state", {"mode": "set_effect", "effect": _require_string_literal(node.args[0], context), "value": args[1]})
+        return [CgStmt("looks_state", {"mode": "set_effect", "effect": _require_string_literal(node.args[0], context), "value": args[1]})]
     if name == "change_effect_by" and len(args) == 2:
-        return CgStmt("looks_state", {"mode": "change_effect", "effect": _require_string_literal(node.args[0], context), "value": args[1]})
+        return [CgStmt("looks_state", {"mode": "change_effect", "effect": _require_string_literal(node.args[0], context), "value": args[1]})]
     if name == "clear_graphic_effects" and not args:
-        return CgStmt("looks_state", {"mode": "clear_effects"})
+        return [CgStmt("looks_state", {"mode": "clear_effects"})]
     if name == "go_front_back" and len(node.args) == 1:
-        return CgStmt("looks_state", {"mode": "go_front_back", "direction": _require_string_literal(node.args[0], context)})
+        return [CgStmt("looks_state", {"mode": "go_front_back", "direction": _require_string_literal(node.args[0], context)})]
     if name == "go_layers" and len(node.args) == 2:
-        return CgStmt("looks_state", {"mode": "go_layers", "direction": _require_string_literal(node.args[0], context), "layers": args[1]})
+        return [CgStmt("looks_state", {"mode": "go_layers", "direction": _require_string_literal(node.args[0], context), "layers": args[1]})]
     if name == "create_clone" and len(node.args) == 1:
-        return CgStmt("create_clone", {"selector": args[0]})
+        return [CgStmt("create_clone", {"selector": args[0]})]
     if name == "delete_this_clone" and not args:
-        return CgStmt("delete_clone", {})
+        return [CgStmt("delete_clone", {})]
     if name == "ask" and len(args) == 1:
-        return CgStmt("ask", {"prompt": args[0]})
+        return [CgStmt("ask", {"prompt": args[0]})]
     if name == "reset_timer" and not args:
-        return CgStmt("reset_timer", {})
+        return [CgStmt("reset_timer", {})]
     if name == "play_note_for_beats" and len(args) == 2:
-        return CgStmt("music_play_note", {"note": args[0], "beats": args[1]})
+        return [CgStmt("music_play_note", {"note": args[0], "beats": args[1]})]
     if name == "stop" and len(node.args) == 1:
-        return CgStmt("stop", {"mode": _require_string_literal(node.args[0], context)})
+        return [CgStmt("stop", {"mode": _require_string_literal(node.args[0], context)})]
     if name in context.procedures:
         proc = context.procedures[name]
         if proc.target_name != context.target.name:
@@ -522,8 +657,40 @@ def lower_call_stmt(node: ast.Call, context: CompileContext) -> CgStmt:
             raise CodegenError(f"Procedure {name} argument count mismatch")
         arg_names = _binding_argument_names(proc, tuple(arg.arg for arg in fn_node.args.args))
         arg_ids = {f"arg:{name}:{index}": lower_expr(arg, context) for index, arg in enumerate(node.args)}
-        return CgStmt("proc_call", {"proccode": proc.proccode or _procedure_proccode(name, arg_names), "arguments": arg_ids})
+        return [CgStmt("proc_call", {"proccode": proc.proccode or _procedure_proccode(name, arg_names), "arguments": arg_ids})]
     raise CodegenError(f"Unsupported call in statement position: {name}")
+
+
+def _lower_assignment_from_returning_call(target_name: str, value: ast.AST, context: CompileContext) -> list[CgStmt] | None:
+    call_info = _lower_direct_returning_call(value, context)
+    if call_info is None:
+        return None
+    call_stmt, proc = call_info
+    if proc.return_variable is None:
+        raise CodegenError("Internal compiler error: returning procedure is missing a return variable")
+    return [
+        call_stmt,
+        CgStmt("set_var", {"name": target_name, "value": CgExpr("var", proc.return_variable)}),
+    ]
+
+
+def _lower_direct_returning_call(value: ast.AST, context: CompileContext) -> tuple[CgStmt, ProcedureBinding] | None:
+    if not isinstance(value, ast.Call) or not isinstance(value.func, ast.Name):
+        return None
+    name = value.func.id
+    if name not in context.procedures:
+        return None
+    proc = context.procedures[name]
+    if proc.target_name != context.target.name:
+        raise CodegenError("Procedures can only be called within the same target in v1")
+    if not proc.returns_value:
+        raise CodegenError(f"Procedure {name} does not return a value")
+    fn_node = get_function_ast(proc.function)
+    if len(value.args) != len(fn_node.args.args):
+        raise CodegenError(f"Procedure {name} argument count mismatch")
+    arg_names = _binding_argument_names(proc, tuple(arg.arg for arg in fn_node.args.args))
+    arg_ids = {f"arg:{name}:{index}": lower_expr(arg, context) for index, arg in enumerate(value.args)}
+    return CgStmt("proc_call", {"proccode": proc.proccode or _procedure_proccode(name, arg_names), "arguments": arg_ids}), proc
 
 
 def lower_expr(node: ast.AST, context: CompileContext) -> CgExpr:
@@ -588,15 +755,36 @@ def lower_expr(node: ast.AST, context: CompileContext) -> CgExpr:
             if isinstance(receiver, ListHandle):
                 if name == "item" and len(node.args) == 1:
                     return CgExpr("list_item", {"name": receiver.name, "index": lower_expr(node.args[0], context)})
+                if name == "at" and len(node.args) == 1:
+                    return CgExpr("list_item", {"name": receiver.name, "index": lower_expr(node.args[0], context)})
                 if name == "length" and not node.args:
                     return CgExpr("list_length", receiver.name)
                 if name == "contains" and len(node.args) == 1:
                     return CgExpr("list_contains", {"name": receiver.name, "item": lower_expr(node.args[0], context)})
+                if name == "has" and len(node.args) == 1:
+                    return CgExpr("list_contains", {"name": receiver.name, "item": lower_expr(node.args[0], context)})
                 if name == "contents" and not node.args:
                     return CgExpr("list_contents", receiver.name)
+                if name == "text" and not node.args:
+                    return CgExpr("list_contents", receiver.name)
             if isinstance(receiver, VariableHandle):
+                if name == "get" and not node.args:
+                    return CgExpr("var", receiver.name)
                 if name == "value" and not node.args:
                     return CgExpr("var", receiver.name)
+                if name == "join" and len(node.args) == 1:
+                    return CgExpr("operator_join", args=(CgExpr("var", receiver.name), lower_expr(node.args[0], context)))
+                if name == "letter" and len(node.args) == 1:
+                    return CgExpr("operator_letter_of", args=(lower_expr(node.args[0], context), CgExpr("var", receiver.name)))
+                if name == "length" and not node.args:
+                    return CgExpr("operator_length", args=(CgExpr("var", receiver.name),))
+                if name == "contains" and len(node.args) == 1:
+                    return CgExpr("operator_contains", args=(CgExpr("var", receiver.name), lower_expr(node.args[0], context)))
+                if name == "rounded" and not node.args:
+                    return CgExpr("operator_round", args=(CgExpr("var", receiver.name),))
+                if name == "math" and len(node.args) == 1:
+                    literal = _require_string_literal(node.args[0], context)
+                    return CgExpr("operator_mathop", value=literal, args=(CgExpr("var", receiver.name),))
             if isinstance(receiver, TargetBuilder):
                 _require_current_target_receiver(receiver, context)
                 if name == "touching_object" and len(node.args) == 1:
@@ -679,6 +867,11 @@ def lower_expr(node: ast.AST, context: CompileContext) -> CgExpr:
             return CgExpr("operator_mathop", value=literal, args=(args[1],))
         if name == "random_between" and len(args) == 2:
             return CgExpr("operator_random", args=args)
+        if name in context.procedures:
+            proc = context.procedures[name]
+            if proc.returns_value:
+                raise CodegenError("Return-value procedures can only be used as a direct assigned value or return in v1")
+            raise CodegenError(f"Procedure {name} does not return a value")
         raise CodegenError(f"Unsupported call in expression position: {name}")
     raise CodegenError(f"Unsupported expression syntax: {node.__class__.__name__}")
 
@@ -1199,4 +1392,3 @@ def _literal_payload(value: Any) -> list[Any]:
     if isinstance(value, (int, float)):
         return [4, str(value)]
     return [10, str(value)]
-

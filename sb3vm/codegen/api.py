@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable
@@ -7,6 +8,7 @@ from sb3vm.log import get_logger
 
 
 _LOGGER = get_logger(__name__)
+SB3VM_INTERNAL_PREFIX = "__sb3vm_internal__"
 
 
 class AuthoringRuntimeError(RuntimeError):
@@ -100,11 +102,35 @@ class VariableHandle:
     name: str
     default: Any = 0
 
+    def get(self) -> Any:
+        return _authoring_only("VariableHandle.get")(self)
+
+    def value(self) -> Any:
+        return _authoring_only("VariableHandle.value")(self)
+
     def set(self, value: Any) -> Any:
         return _authoring_only("VariableHandle.set")(self, value)
 
     def change(self, value: Any) -> Any:
         return _authoring_only("VariableHandle.change")(self, value)
+
+    def join(self, other: Any) -> Any:
+        return _authoring_only("VariableHandle.join")(self, other)
+
+    def letter(self, index: Any) -> Any:
+        return _authoring_only("VariableHandle.letter")(self, index)
+
+    def length(self) -> Any:
+        return _authoring_only("VariableHandle.length")(self)
+
+    def contains(self, part: Any) -> Any:
+        return _authoring_only("VariableHandle.contains")(self, part)
+
+    def rounded(self) -> Any:
+        return _authoring_only("VariableHandle.rounded")(self)
+
+    def math(self, op: str) -> Any:
+        return _authoring_only("VariableHandle.math")(self, op)
 
 
 @dataclass(frozen=True)
@@ -116,8 +142,14 @@ class ListHandle:
     def append(self, item: Any) -> Any:
         return _authoring_only("ListHandle.append")(self, item)
 
+    def push(self, item: Any) -> Any:
+        return _authoring_only("ListHandle.push")(self, item)
+
     def delete(self, index: Any) -> Any:
         return _authoring_only("ListHandle.delete")(self, index)
+
+    def remove(self, index: Any) -> Any:
+        return _authoring_only("ListHandle.remove")(self, index)
 
     def clear(self) -> Any:
         return _authoring_only("ListHandle.clear")()
@@ -131,14 +163,23 @@ class ListHandle:
     def item(self, index: Any) -> Any:
         return _authoring_only("ListHandle.item")(self, index)
 
+    def at(self, index: Any) -> Any:
+        return _authoring_only("ListHandle.at")(self, index)
+
     def length(self) -> Any:
         return _authoring_only("ListHandle.length")(self)
 
     def contains(self, item: Any) -> Any:
         return _authoring_only("ListHandle.contains")(self, item)
 
+    def has(self, item: Any) -> Any:
+        return _authoring_only("ListHandle.has")(self, item)
+
     def contents(self) -> Any:
         return _authoring_only("ListHandle.contents")(self)
+
+    def text(self) -> Any:
+        return _authoring_only("ListHandle.text")(self)
 
 
 @dataclass(frozen=True)
@@ -204,6 +245,8 @@ class ProcedureBinding:
     proccode: str | None = None
     argument_names: tuple[str, ...] | None = None
     argument_defaults: tuple[Any, ...] | None = None
+    returns_value: bool = False
+    return_variable: str | None = None
 
 
 @dataclass
@@ -231,8 +274,20 @@ class TargetBuilder:
     procedures: dict[str, ProcedureBinding] = field(default_factory=dict)
     costumes: list[dict[str, Any]] = field(default_factory=list)
     sounds: list[dict[str, Any]] = field(default_factory=list)
+    _internal_variable_counter: int = 0
 
     def variable(self, name: str, default: Any = 0) -> VariableHandle:
+        handle = VariableHandle(self.name, name, default)
+        self.variables[name] = handle
+        return handle
+
+    def internal_variable(self, category: str, *, default: Any = "", hint: str | None = None) -> VariableHandle:
+        token = re.sub(r"\W+", "_", hint or category).strip("_").lower() or category
+        base = f"{SB3VM_INTERNAL_PREFIX}{category}__{token}"
+        name = base
+        while name in self.variables:
+            self._internal_variable_counter += 1
+            name = f"{base}_{self._internal_variable_counter}"
         handle = VariableHandle(self.name, name, default)
         self.variables[name] = handle
         return handle
@@ -300,8 +355,8 @@ class TargetBuilder:
 
         return decorator
 
-    def add_costume(self, costume: dict[str, Any]) -> None:
-        self.costumes.append(dict(costume))
+    def add_costume(self, costume: Any) -> None:
+        self.costumes.append(_coerce_project_record(costume))
 
     def wait(self, duration: Any) -> Any:
         return wait(duration)
@@ -450,8 +505,8 @@ class TargetBuilder:
     def backdrop_number(self) -> Any:
         return backdrop_number()
 
-    def add_sound(self, sound: dict[str, Any]) -> None:
-        self.sounds.append(dict(sound))
+    def add_sound(self, sound: Any) -> None:
+        self.sounds.append(_coerce_project_record(sound))
 
 
 @dataclass
@@ -497,3 +552,14 @@ class ScratchProject:
     def all_targets(self) -> list[TargetBuilder]:
         return [self.stage, *self.sprites]
 
+
+def _coerce_project_record(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    to_dict = getattr(value, "to_dict", None)
+    if callable(to_dict):
+        data = to_dict()
+        if not isinstance(data, dict):
+            raise TypeError("Authoring record to_dict() must return a dict")
+        return dict(data)
+    raise TypeError("Authoring records must be dict-like or provide to_dict()")

@@ -12,6 +12,7 @@ from sb3vm.model.project import Project, Target
 from sb3vm.parse.ast_nodes import Expr, ProcedureDefinition, Script, Stmt
 from sb3vm.parse.extract_scripts import extract_scripts
 
+from .api import SB3VM_INTERNAL_PREFIX
 from .compiler import CodegenError
 
 
@@ -41,6 +42,11 @@ _IMPORT_NAMES = [
     "string_contains",
     "string_length",
     "timer",
+]
+
+_STDLIB_IMPORT_NAMES = [
+    "CostumeSpec",
+    "SoundSpec",
 ]
 
 _SPECIAL_SELECTOR_CONSTANTS = {
@@ -135,8 +141,10 @@ class _Exporter:
         self.list_aliases: dict[tuple[str, str], str] = {}
         self.procedure_names: dict[tuple[str, str], str] = {}
         self.procedure_param_names: dict[tuple[str, str], dict[str, str]] = {}
+        self.procedure_return_vars: dict[tuple[str, str], str] = {}
         self.script_names: dict[tuple[str, int], str] = {}
         self._validate()
+        self._detect_procedure_returns()
         self._allocate_names()
 
     def _variable_alias(self, target_name: str, name: str) -> str:
@@ -200,6 +208,76 @@ class _Exporter:
     def _stop_target_literal(self, value: Any) -> str:
         return self._enum_symbol(value, _STOP_TARGET_ENUMS) or self._literal(value)
 
+    def _is_internal_name(self, name: str) -> bool:
+        return name.startswith(SB3VM_INTERNAL_PREFIX)
+
+    def _detect_procedure_returns(self) -> None:
+        for procedure in self.parse_result.procedures:
+            return_var = self._tail_return_var(procedure.body)
+            if return_var is not None:
+                self.procedure_return_vars[(procedure.target_name, procedure.proccode)] = return_var
+
+    def _tail_return_var(self, body: list[Stmt]) -> str | None:
+        if not body:
+            return None
+        return self._stmt_tail_return_var(body[-1])
+
+    def _stmt_tail_return_var(self, stmt: Stmt) -> str | None:
+        if stmt.kind == "set_var":
+            name = str(stmt.args["name"])
+            return name if self._is_internal_name(name) else None
+        if stmt.kind == "if_else":
+            body_return = self._tail_return_var(stmt.args["body"])
+            else_return = self._tail_return_var(stmt.args["else_body"])
+            if body_return is not None and body_return == else_return:
+                return body_return
+        return None
+
+    def _costume_literal(self, costume: dict[str, Any]) -> str:
+        extras = {
+            key: value
+            for key, value in costume.items()
+            if key
+            not in {
+                "name",
+                "assetId",
+                "dataFormat",
+                "md5ext",
+                "rotationCenterX",
+                "rotationCenterY",
+                "bitmapResolution",
+            }
+        }
+        return (
+            "CostumeSpec("
+            f"name={self._literal(costume.get('name', ''))}, "
+            f"asset_id={self._literal(costume.get('assetId', ''))}, "
+            f"data_format={self._literal(costume.get('dataFormat', ''))}, "
+            f"md5ext={self._literal(costume.get('md5ext', ''))}, "
+            f"rotation_center_x={self._literal(costume.get('rotationCenterX', 0))}, "
+            f"rotation_center_y={self._literal(costume.get('rotationCenterY', 0))}, "
+            f"bitmap_resolution={self._literal(costume.get('bitmapResolution', 1))}, "
+            f"extras={self._literal(extras)})"
+        )
+
+    def _sound_literal(self, sound: dict[str, Any]) -> str:
+        extras = {
+            key: value
+            for key, value in sound.items()
+            if key not in {"name", "assetId", "dataFormat", "md5ext", "sampleCount", "rate", "format"}
+        }
+        return (
+            "SoundSpec("
+            f"name={self._literal(sound.get('name', ''))}, "
+            f"asset_id={self._literal(sound.get('assetId', ''))}, "
+            f"data_format={self._literal(sound.get('dataFormat', ''))}, "
+            f"md5ext={self._literal(sound.get('md5ext', ''))}, "
+            f"sample_count={self._literal(sound.get('sampleCount', 0))}, "
+            f"rate={self._literal(sound.get('rate', 0))}, "
+            f"sound_format={self._literal(sound.get('format', ''))}, "
+            f"extras={self._literal(extras)})"
+        )
+
     def _validate(self) -> None:
         unsupported = [script for script in self.parse_result.scripts if not script.supported]
         if unsupported:
@@ -218,6 +296,8 @@ class _Exporter:
         for target in self.project.targets:
             target_alias = self.target_aliases[target.name]
             for _, (name, _) in target.variables.items():
+                if self._is_internal_name(name):
+                    continue
                 fallback = f"{target_alias}_var" if not target.is_stage else "var"
                 base = name if target.is_stage else f"{target_alias}_{name}"
                 self.variable_aliases[(target.name, name)] = global_names.alloc(base, fallback)
@@ -255,6 +335,8 @@ class _Exporter:
         for name in _IMPORT_NAMES:
             lines.append(f"    {name},")
         lines.append(")")
+        if any(target.costumes or target.sounds for target in self.project.targets):
+            lines.append(f"from sb3vm.codegen.stdlib import {', '.join(_STDLIB_IMPORT_NAMES)}")
         lines.append("")
         lines.append(f"project = ScratchProject({self._literal(self.project.meta.get('vm', 'Scratch Project'))})")
         lines.append("stage = project.stage")
@@ -279,13 +361,15 @@ class _Exporter:
                 )
                 self._emit_target_properties(lines, alias, target, skip={"x", "y", "visible", "current_costume"})
             for costume in target.costumes:
-                lines.append(f"{alias}.add_costume({costume!r})")
+                lines.append(f"{alias}.add_costume({self._costume_literal(costume)})")
             for sound in target.sounds:
-                lines.append(f"{alias}.add_sound({sound!r})")
+                lines.append(f"{alias}.add_sound({self._sound_literal(sound)})")
         if any(target.costumes or target.sounds or not target.is_stage for target in self.project.targets):
             lines.append("")
         for target in self.project.targets:
             for _, (name, default) in target.variables.items():
+                if self._is_internal_name(name):
+                    continue
                 alias = self.variable_aliases[(target.name, name)]
                 target_alias = self.target_aliases[target.name]
                 lines.append(f"{alias} = {target_alias}.variable({self._literal(name)}, {default!r})")
@@ -341,12 +425,13 @@ class _Exporter:
         target_alias = self.target_aliases[procedure.target_name]
         fn_name = self.procedure_names[(procedure.target_name, procedure.proccode)]
         param_map = self.procedure_param_names[(procedure.target_name, procedure.proccode)]
+        return_var = self.procedure_return_vars.get((procedure.target_name, procedure.proccode))
         params = [param_map[arg_id] for arg_id in procedure.argument_ids]
         lines.append(
             f"@{target_alias}.procedure(warp={procedure.warp!r}, proccode={self._literal(procedure.proccode)}, argument_names={tuple(procedure.argument_names)!r}, argument_defaults={tuple(procedure.argument_defaults)!r})"
         )
         lines.append(f"def {fn_name}({', '.join(params)}):")
-        lines.extend(self._emit_body(procedure.body, procedure.target_name, param_map))
+        lines.extend(self._emit_body(procedure.body, procedure.target_name, param_map, return_var=return_var))
         return lines
 
     def _emit_script(self, script: Script, ordinal: int) -> list[str]:
@@ -370,24 +455,91 @@ class _Exporter:
         lines.extend(self._emit_body(script.body, script.target_name, {}))
         return lines
 
-    def _emit_body(self, body: list[Stmt], target_name: str, proc_params: dict[str, str], indent: str = "    ") -> list[str]:
+    def _emit_body(
+        self,
+        body: list[Stmt],
+        target_name: str,
+        proc_params: dict[str, str],
+        indent: str = "    ",
+        return_var: str | None = None,
+    ) -> list[str]:
         if not body:
             return [f"{indent}pass"]
         lines: list[str] = []
-        for stmt in body:
-            lines.extend(self._emit_stmt(stmt, target_name, proc_params, indent))
+        index = 0
+        while index < len(body):
+            folded = self._emit_returning_proc_assignment(body, index, target_name, proc_params, indent, return_var)
+            if folded is not None:
+                emitted, consumed = folded
+                lines.extend(emitted)
+                index += consumed
+                continue
+            stmt = body[index]
+            lines.extend(
+                self._emit_stmt(
+                    stmt,
+                    target_name,
+                    proc_params,
+                    indent,
+                    tail_return_var=return_var if index == len(body) - 1 else None,
+                )
+            )
+            index += 1
         return lines
 
-    def _emit_stmt(self, stmt: Stmt, target_name: str, proc_params: dict[str, str], indent: str) -> list[str]:
+    def _emit_returning_proc_assignment(
+        self,
+        body: list[Stmt],
+        index: int,
+        target_name: str,
+        proc_params: dict[str, str],
+        indent: str,
+        return_var: str | None,
+    ) -> tuple[list[str], int] | None:
+        if index + 1 >= len(body):
+            return None
+        proc_call = body[index]
+        assign = body[index + 1]
+        if proc_call.kind != "proc_call" or assign.kind != "set_var":
+            return None
+        proc_key = (target_name, proc_call.args["proccode"])
+        called_return_var = self.procedure_return_vars.get(proc_key)
+        if called_return_var is None:
+            return None
+        value = assign.args["value"]
+        if not isinstance(value, Expr) or value.kind != "var" or str(value.value) != called_return_var:
+            return None
+        proc = self.procedures_by_key[proc_key]
+        fn_name = self.procedure_names[proc_key]
+        args = [self._emit_expr(proc_call.args["arguments"][arg_id], target_name, proc_params) for arg_id in proc.argument_ids]
+        call_expr = f"{fn_name}({', '.join(args)})"
+        target_var = str(assign.args["name"])
+        if return_var is not None and target_var == return_var:
+            return [f"{indent}return {call_expr}"], 2
+        if self._is_internal_name(target_var):
+            return None
+        return [f"{indent}{self._variable_alias(target_name, target_var)} = {call_expr}"], 2
+
+    def _emit_stmt(
+        self,
+        stmt: Stmt,
+        target_name: str,
+        proc_params: dict[str, str],
+        indent: str,
+        tail_return_var: str | None = None,
+    ) -> list[str]:
         kind = stmt.kind
         if kind == "set_var":
+            name = str(stmt.args["name"])
+            if tail_return_var is not None and name == tail_return_var:
+                return [f"{indent}return {self._emit_expr(stmt.args['value'], target_name, proc_params)}"]
             return [f"{indent}{self._variable_alias(target_name, str(stmt.args['name']))} = {self._emit_expr(stmt.args['value'], target_name, proc_params)}"]
         if kind == "change_var":
             return [f"{indent}{self._variable_alias(target_name, str(stmt.args['name']))} += {self._emit_expr(stmt.args['value'], target_name, proc_params)}"]
         if kind == "list_add":
-            return [f"{indent}{self._list_alias(target_name, str(stmt.args['name']))}.append({self._emit_expr(stmt.args['item'], target_name, proc_params)})"]
+            return [f"{indent}{self._list_alias(target_name, str(stmt.args['name']))}.push({self._emit_expr(stmt.args['item'], target_name, proc_params)})"]
         if kind == "list_delete":
-            return [f"{indent}{self._list_alias(target_name, str(stmt.args['name']))}.delete({self._emit_expr(stmt.args['index'], target_name, proc_params)})"]
+            return [f"{indent}{self._list_alias(target_name, str(stmt.args['name']))}.remove({self._emit_expr(stmt.args['index'], target_name, proc_params)})"]
         if kind == "list_delete_all":
             return [f"{indent}{self._list_alias(target_name, str(stmt.args['name']))}.clear()"]
         if kind == "list_insert":
@@ -410,9 +562,9 @@ class _Exporter:
             return lines
         if kind == "if_else":
             lines = [f"{indent}if {self._emit_expr(stmt.args['condition'], target_name, proc_params)}:"]
-            lines.extend(self._emit_body(stmt.args['body'], target_name, proc_params, indent + '    '))
+            lines.extend(self._emit_body(stmt.args['body'], target_name, proc_params, indent + '    ', return_var=tail_return_var))
             lines.append(f"{indent}else:")
-            lines.extend(self._emit_body(stmt.args['else_body'], target_name, proc_params, indent + '    '))
+            lines.extend(self._emit_body(stmt.args['else_body'], target_name, proc_params, indent + '    ', return_var=tail_return_var))
             return lines
         if kind == "repeat_until":
             lines = [f"{indent}while not {self._emit_expr(stmt.args['condition'], target_name, proc_params)}:"]
@@ -487,6 +639,11 @@ class _Exporter:
     def _emit_value(self, value: Any, target_name: str, proc_params: dict[str, str]) -> str:
         return self._emit_expr(value, target_name, proc_params) if isinstance(value, Expr) else self._literal(value)
 
+    def _emit_variable_string_receiver(self, expr: Expr, target_name: str, proc_params: dict[str, str]) -> str | None:
+        if expr.kind == "var":
+            return self._variable_alias(target_name, str(expr.value))
+        return None
+
     def _emit_expr(self, expr: Expr, target_name: str, proc_params: dict[str, str]) -> str:
         kind = expr.kind
         if kind == 'literal':
@@ -496,13 +653,13 @@ class _Exporter:
         if kind == 'proc_arg':
             return proc_params[str(expr.value)]
         if kind == 'list_item':
-            return f"{self._list_alias(target_name, str(expr.value['name']))}.item({self._emit_expr(expr.value['index'], target_name, proc_params)})"
+            return f"{self._list_alias(target_name, str(expr.value['name']))}.at({self._emit_expr(expr.value['index'], target_name, proc_params)})"
         if kind == 'list_length':
             return f"{self._list_alias(target_name, str(expr.value))}.length()"
         if kind == 'list_contains':
-            return f"{self._list_alias(target_name, str(expr.value['name']))}.contains({self._emit_expr(expr.value['item'], target_name, proc_params)})"
+            return f"{self._list_alias(target_name, str(expr.value['name']))}.has({self._emit_expr(expr.value['item'], target_name, proc_params)})"
         if kind == 'list_contents':
-            return f"{self._list_alias(target_name, str(expr.value))}.contents()"
+            return f"{self._list_alias(target_name, str(expr.value))}.text()"
         if kind in {'operator_add', 'operator_subtract', 'operator_multiply', 'operator_divide', 'operator_mod', 'operator_equals', 'operator_lt', 'operator_gt'}:
             op = {
                 'operator_add': '+',
@@ -522,16 +679,34 @@ class _Exporter:
         if kind == 'operator_not':
             return f"(not {self._emit_expr(expr.args[0], target_name, proc_params)})"
         if kind == 'operator_join':
+            receiver = self._emit_variable_string_receiver(expr.args[0], target_name, proc_params)
+            if receiver is not None:
+                return f"{receiver}.join({self._emit_expr(expr.args[1], target_name, proc_params)})"
             return f"join({self._emit_expr(expr.args[0], target_name, proc_params)}, {self._emit_expr(expr.args[1], target_name, proc_params)})"
         if kind == 'operator_letter_of':
+            receiver = self._emit_variable_string_receiver(expr.args[1], target_name, proc_params)
+            if receiver is not None:
+                return f"{receiver}.letter({self._emit_expr(expr.args[0], target_name, proc_params)})"
             return f"letter_of({self._emit_expr(expr.args[0], target_name, proc_params)}, {self._emit_expr(expr.args[1], target_name, proc_params)})"
         if kind == 'operator_length':
+            receiver = self._emit_variable_string_receiver(expr.args[0], target_name, proc_params)
+            if receiver is not None:
+                return f"{receiver}.length()"
             return f"string_length({self._emit_expr(expr.args[0], target_name, proc_params)})"
         if kind == 'operator_contains':
+            receiver = self._emit_variable_string_receiver(expr.args[0], target_name, proc_params)
+            if receiver is not None:
+                return f"{receiver}.contains({self._emit_expr(expr.args[1], target_name, proc_params)})"
             return f"string_contains({self._emit_expr(expr.args[0], target_name, proc_params)}, {self._emit_expr(expr.args[1], target_name, proc_params)})"
         if kind == 'operator_round':
+            receiver = self._emit_variable_string_receiver(expr.args[0], target_name, proc_params)
+            if receiver is not None:
+                return f"{receiver}.rounded()"
             return f"round_value({self._emit_expr(expr.args[0], target_name, proc_params)})"
         if kind == 'operator_mathop':
+            receiver = self._emit_variable_string_receiver(expr.args[0], target_name, proc_params)
+            if receiver is not None:
+                return f"{receiver}.math({self._literal(expr.value)})"
             return f"math_op({self._literal(expr.value)}, {self._emit_expr(expr.args[0], target_name, proc_params)})"
         if kind == 'operator_random':
             return f"random_between({self._emit_expr(expr.args[0], target_name, proc_params)}, {self._emit_expr(expr.args[1], target_name, proc_params)})"

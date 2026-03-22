@@ -1,8 +1,55 @@
-Metadata-Version: 2.4
+Metadata-Version: 2.1
 Name: sb3vm
-Version: 0.1.0
+Version: 0.3.0
 Summary: Headless Scratch sb3 VM MVP
+Home-page: UNKNOWN
+License: UNKNOWN
+Platform: UNKNOWN
 Requires-Python: >=3.10
+Description-Content-Type: text/markdown
 Provides-Extra: render
-Requires-Dist: Pillow>=10.0.0; extra == "render"
-Requires-Dist: cairosvg>=2.7.0; extra == "render"
+
+# sb3vm MVP
+
+Headless Scratch `.sb3` VM in Python.
+
+Install:
+- editable install: `pip install -e .`
+- editable install with renderer extras: `pip install -e .[render]`
+
+Included:
+- `.sb3` load/save roundtrip
+- project data preservation for known fields and raw JSON passthrough
+- normalized event-script extraction
+- core interpreter for events, control, data, operators, and state-only motion/looks
+- optional minimal renderer for stage/sprite visualization
+- CLI commands: `inspect`, `resave`, `run`, `run-display`, `benchmark`, `compat`
+- basic pytest coverage
+
+Not included:
+- sound
+- perfect visual fidelity
+- full collision accuracy
+- advanced effects
+
+Display mode:
+- install optional renderer deps with `pip install 'sb3vm[render]'`
+- run a project with a window via `python -m sb3vm.cli run-display examples/demo.sb3`
+- SVG costumes require the optional `cairosvg` dependency from the render extra
+
+Benchmarking:
+- compare interpreted vs compiled execution with `python -m sb3vm.cli benchmark examples/benchmark_hot_loop.sb3 --seconds 0.2`
+- additional benchmark fixtures live in `examples/benchmark_hot_loop.sb3` and `examples/benchmark_broadcast_fanout.sb3`
+
+Compatibility lab:
+- run the checked-in compatibility corpus with `python -m sb3vm.cli compat`
+- add ad hoc local projects with `python -m sb3vm.cli compat --projects-dir /path/to/sb3s`
+- fail CI on compatibility regressions with `python -m sb3vm.cli compat --fail-on-regression`
+
+Python authoring:
+- scaffold a starter module with `python -m sb3vm.cli py-scaffold authored_project.py`
+- build a Python-authored module into `.sb3` with `python -m sb3vm.cli py-build authored_project.py out.sb3`
+- run a Python-authored module through the VM with `python -m sb3vm.cli py-run authored_project.py --seconds 1`
+- inspect the generated project with `python -m sb3vm.cli py-inspect authored_project.py`
+
+

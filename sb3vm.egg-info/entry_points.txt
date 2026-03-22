@@ -1,0 +1,3 @@
+[console_scripts]
+sb3vm = sb3vm.cli:main
+
