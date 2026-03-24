@@ -254,14 +254,14 @@ def test_inspect_reports_structured_unsupported_diagnostics(tmp_path):
     vm = Sb3Vm(load_sb3(path))
     inspect = vm.inspect()
 
-    assert inspect["opcode_coverage"]["unsupported_by_opcode"] == {"motion_movesteps": 1}
+    assert inspect["opcode_coverage"]["unsupported_by_opcode"] == {"pen_penDown": 1}
     assert inspect["unsupported_scripts"] == [
         {
             "target": "Stage",
             "trigger": "green_flag",
             "value": None,
             "node_kind": "statement",
-            "opcode": "motion_movesteps",
+            "opcode": "pen_penDown",
             "reason": "unsupported statement opcode",
             "block_id": "move",
         }
@@ -366,8 +366,8 @@ def test_cli_inspect_emits_opcode_coverage_json(tmp_path):
 
     payload = json.loads(proc.stdout)
     assert proc.returncode == 0
-    assert payload["opcode_coverage"]["by_opcode"]["motion_movesteps"] == 1
-    assert payload["unsupported_scripts"][0]["opcode"] == "motion_movesteps"
+    assert payload["opcode_coverage"]["by_opcode"]["pen_penDown"] == 1
+    assert payload["unsupported_scripts"][0]["opcode"] == "pen_penDown"
 
 
 def test_custom_procedure_arguments_and_nested_calls(tmp_path):
@@ -2367,4 +2367,41 @@ def test_data_show_hide_variable_are_no_ops(tmp_path):
     vm.run_for(0.1)
 
     assert vm.snapshot()["stage_variables"]["score"] == 3.0
+    assert vm.inspect()["unsupported_scripts"] == []
+
+
+def test_motion_movesteps_moves_in_direction(tmp_path):
+    sprite_blocks = {
+        "hat": {"opcode": "event_whenflagclicked", "next": "move", "parent": None, "inputs": {}, "fields": {}, "topLevel": True},
+        "move": {"opcode": "motion_movesteps", "next": None, "parent": "hat", "inputs": {"STEPS": [1, [4, "10"]]}, "fields": {}, "topLevel": False},
+    }
+    project = _base_project(blocks_sprite=sprite_blocks)
+    project["targets"][1]["direction"] = 90.0  # facing right
+    project["targets"][1]["x"] = 0.0
+    project["targets"][1]["y"] = 0.0
+    path = tmp_path / "movesteps.sb3"
+    write_sb3(path, project)
+
+    vm = Sb3Vm(load_sb3(path))
+    vm.run_for(0.1)
+
+    snap = vm.snapshot()["targets"]["Sprite1"]
+    assert abs(snap["x"] - 10.0) < 0.001
+    assert abs(snap["y"] - 0.0) < 0.001
+    assert vm.inspect()["unsupported_scripts"] == []
+
+
+def test_motion_goto_with_menu_not_unsupported(tmp_path):
+    sprite_blocks = {
+        "hat": {"opcode": "event_whenflagclicked", "next": "goto", "parent": None, "inputs": {}, "fields": {}, "topLevel": True},
+        "goto": {"opcode": "motion_goto", "next": None, "parent": "hat", "inputs": {"TO": [1, "menu"]}, "fields": {}, "topLevel": False},
+        "menu": {"opcode": "motion_goto_menu", "next": None, "parent": "goto", "inputs": {}, "fields": {"TO": ["_random_", None]}, "topLevel": False},
+    }
+    project = _base_project(blocks_sprite=sprite_blocks)
+    path = tmp_path / "goto_menu.sb3"
+    write_sb3(path, project)
+
+    vm = Sb3Vm(load_sb3(path))
+    vm.run_for(0.1)
+
     assert vm.inspect()["unsupported_scripts"] == []

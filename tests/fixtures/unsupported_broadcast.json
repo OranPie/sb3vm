@@ -20,12 +20,10 @@
           "topLevel": true
         },
         "move": {
-          "opcode": "motion_movesteps",
+          "opcode": "pen_penDown",
           "next": null,
           "parent": "hat",
-          "inputs": {
-            "STEPS": [1, [4, "10"]]
-          },
+          "inputs": {},
           "fields": {},
           "topLevel": false
         }

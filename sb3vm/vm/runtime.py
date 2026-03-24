@@ -1024,6 +1024,11 @@ class Sb3Vm:
                 instance.direction = self._normalize_direction(90.0 - math.degrees(math.atan2(dy, dx)))
         elif mode == "set_rotation_style":
             instance.rotation_style = self._normalize_rotation_style(str(values["style"]))
+        elif mode == "move_steps":
+            steps = to_number(values["steps"])
+            angle = math.radians(instance.direction - 90.0)
+            instance.x += steps * math.cos(angle)
+            instance.y += steps * math.sin(angle)
         elif mode == "if_edge_bounce":
             self._apply_if_edge_bounce(instance)
         return None

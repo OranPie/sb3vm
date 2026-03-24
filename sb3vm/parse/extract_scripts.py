@@ -56,6 +56,10 @@ SUPPORTED_EXPR_OPS = {
     "sensing_mousedown",
     "sensing_touchingobject",
     "sensing_touchingobjectmenu",
+    "motion_goto_menu",
+    "motion_glideto_menu",
+    "motion_pointtowards_menu",
+    "looks_backdrops",
     "sensing_of",
     "sensing_of_object_menu",
     "sensing_distanceto",
@@ -105,6 +109,7 @@ SUPPORTED_STMT_OPS = {
     "motion_goto",
     "motion_glidesecstoxy",
     "motion_glideto",
+    "motion_movesteps",
     "motion_setx",
     "motion_sety",
     "motion_changexby",
@@ -453,6 +458,8 @@ class ProjectParser:
             return Stmt("move_state", {"mode": "goto_xy", "x": expr("X"), "y": expr("Y")})
         if opcode == "motion_goto":
             return Stmt("move_state", {"mode": "goto_target", "target": expr("TO")})
+        if opcode == "motion_movesteps":
+            return Stmt("move_state", {"mode": "move_steps", "steps": expr("STEPS")})
         if opcode == "motion_glidesecstoxy":
             return Stmt("move_state", {"mode": "glide_xy", "duration": expr("SECS"), "x": expr("X"), "y": expr("Y")})
         if opcode == "motion_glideto":
@@ -713,6 +720,14 @@ class ProjectParser:
             return Expr("touching_object", args=[self.parse_input_expr(target, block_id, block, "TOUCHINGOBJECTMENU", procedure_args=procedure_args)])
         if opcode == "sensing_touchingobjectmenu":
             return Expr("literal", self.field_value(block, "TOUCHINGOBJECTMENU") or "")
+        if opcode == "motion_goto_menu":
+            return Expr("literal", self.field_value(block, "TO") or "")
+        if opcode == "motion_glideto_menu":
+            return Expr("literal", self.field_value(block, "TO") or "")
+        if opcode == "motion_pointtowards_menu":
+            return Expr("literal", self.field_value(block, "TOWARDS") or "")
+        if opcode == "looks_backdrops":
+            return Expr("literal", self.field_value(block, "BACKDROP") or "")
         if opcode == "sensing_of":
             prop = self.field_value(block, "PROPERTY") or ""
             target_expr = self.parse_input_expr(target, block_id, block, "OBJECT", procedure_args=procedure_args)
