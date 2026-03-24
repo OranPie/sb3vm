@@ -73,6 +73,8 @@ class Sb3Vm:
         self._key_scripts: dict[str, tuple[Script, ...]] = {}
         self._any_key_scripts: tuple[Script, ...] = ()
         self._sprite_clicked_scripts: dict[str, tuple[Script, ...]] = {}
+        self._greater_than_scripts: list[Script] = []
+        self._greater_than_last_above: dict[int, bool] = {}
         self.ir_scripts: dict[str, IrScript] = {
             f"{index}:{script.target_name}:{script.trigger.kind}:{script.trigger.value or ''}": lower_script(
                 script,
@@ -137,6 +139,10 @@ class Sb3Vm:
                 continue
             if trigger.kind == "sprite_clicked":
                 sprite_clicked_scripts.setdefault(script.target_name, []).append(script)
+                continue
+            if trigger.kind == "greater_than":
+                if script.supported:
+                    self._greater_than_scripts.append(script)
         self._green_flag_scripts = tuple(green_flag_scripts)
         self._broadcast_scripts = {name: tuple(scripts) for name, scripts in broadcast_scripts.items()}
         self._backdrop_scripts = {name: tuple(scripts) for name, scripts in backdrop_scripts.items()}
@@ -391,6 +397,7 @@ class Sb3Vm:
         trace(_LOGGER, "vm.Sb3Vm.step", "step begin dt=%.5f time=%.5f threads=%d", dt, self.state.time_seconds, len(self.state.threads))
         self.state.time_seconds += dt
         self._poll_input_events()
+        self._poll_greater_than_triggers()
         threads = self.state.threads
         for thread in tuple(threads.values()):
             if thread.done:
@@ -465,6 +472,14 @@ class Sb3Vm:
                     continue
                 thread.frames.append(FrameState(kind="sequence", stmts=frame.loop.body))
                 continue
+            if frame.kind == "wait_until_loop":
+                if frame.loop is None:
+                    thread.frames.pop()
+                    continue
+                if to_bool(eval_expr(frame.loop.condition, self.state, thread, self)):
+                    thread.frames.pop()
+                    continue
+                return
             if frame.index >= len(frame.stmts):
                 popped = thread.frames.pop()
                 if popped.kind == "sequence" and thread.frames and thread.frames[-1].kind in {"repeat_loop", "repeat_until_loop", "forever_loop"}:
@@ -600,6 +615,11 @@ class Sb3Vm:
         if kind == "reset_timer":
             self.state.reset_timer()
             return None
+        if kind == "no_op":
+            return None
+        if kind == "wait_until":
+            thread.frames.append(FrameState(kind="wait_until_loop", stmts=[], loop=LoopState(kind="wait_until", body=[], condition=stmt.args["condition"])))
+            return "yield"
         if kind == "unsupported":
             thread.done = True
             return "block"
@@ -1004,6 +1024,8 @@ class Sb3Vm:
                 instance.direction = self._normalize_direction(90.0 - math.degrees(math.atan2(dy, dx)))
         elif mode == "set_rotation_style":
             instance.rotation_style = self._normalize_rotation_style(str(values["style"]))
+        elif mode == "if_edge_bounce":
+            self._apply_if_edge_bounce(instance)
         return None
 
     def _execute_looks_state(self, thread: ThreadState, mode: str, values: dict[str, Any]) -> str | None:
@@ -1206,3 +1228,103 @@ class Sb3Vm:
         new_index = min(max(current_index + delta, 0), len(ordered))
         ordered.insert(new_index, instance)
         self._reindex_layers(ordered)
+
+    def _poll_greater_than_triggers(self) -> None:
+        for index, script in enumerate(self._greater_than_scripts):
+            trigger = script.trigger
+            menu = (trigger.value or "").upper()
+            if menu == "TIMER":
+                current_val = self.timer_seconds()
+            else:
+                current_val = 0.0
+            # Evaluate threshold using a temporary thread on the stage
+            stage_id = self.state.original_instance_ids.get("Stage", next(iter(self.state.original_instance_ids.values()), 0))
+            dummy_thread = ThreadState(id=0, instance_id=stage_id)
+            threshold_val = to_number(eval_expr(trigger.threshold, self.state, dummy_thread, self)) if trigger.threshold is not None else 0.0
+            was_above = self._greater_than_last_above.get(index, False)
+            now_above = current_val > threshold_val
+            self._greater_than_last_above[index] = now_above
+            if now_above and not was_above:
+                self._spawn_for_matching_instances(script, include_clones=False)
+
+    def _sensing_of(self, instance_id: int, property_name: str, target_selector: Any) -> Any:
+        token = str(target_selector).strip()
+        lowered_token = token.lower()
+        prop = property_name.strip().lower()
+        # Resolve target instance
+        if lowered_token in {"_stage_", "stage"}:
+            target_inst = self.state.instances.get(self.state.original_instance_ids.get("Stage", -1))
+        else:
+            orig_id = self.state.original_instance_ids.get(token)
+            target_inst = self.state.instances.get(orig_id) if orig_id is not None else None
+        if target_inst is None:
+            return 0
+        if prop == "x position":
+            return target_inst.x
+        if prop == "y position":
+            return target_inst.y
+        if prop == "direction":
+            return target_inst.direction
+        if prop == "costume #" or prop == "costume number":
+            return target_inst.costume_index + 1
+        if prop == "costume name":
+            costumes = self._target_costumes(target_inst.source_target_name)
+            if not costumes:
+                return ""
+            return costumes[target_inst.costume_index % len(costumes)].get("name", "")
+        if prop == "size":
+            return target_inst.size
+        if prop == "backdrop #" or prop == "backdrop number":
+            stage = self._stage_instance()
+            return stage.costume_index + 1
+        if prop == "backdrop name":
+            return self._backdrop_name()
+        if prop == "volume":
+            return 100
+        # Fall back to variable lookup
+        val = target_inst.local_variables.get(property_name)
+        if val is not None:
+            return val
+        return self.state.stage_variables.get(property_name, 0)
+
+    def _distance_to(self, instance_id: int, selector: Any) -> float:
+        instance = self.state.get_instance(instance_id)
+        token = str(selector).strip()
+        lowered = token.lower()
+        if lowered == "_mouse_":
+            tx = self.input_provider.mouse_x()
+            ty = self.input_provider.mouse_y()
+        else:
+            orig_id = self.state.original_instance_ids.get(token)
+            if orig_id is None:
+                return 10000.0
+            other = self.state.instances.get(orig_id)
+            if other is None:
+                return 10000.0
+            tx, ty = other.x, other.y
+        dx = instance.x - tx
+        dy = instance.y - ty
+        return math.sqrt(dx * dx + dy * dy)
+
+    def _apply_if_edge_bounce(self, instance: Any) -> None:
+        half_w = 240.0
+        half_h = 180.0
+        x, y = instance.x, instance.y
+        # Convert Scratch direction to math angle (radians)
+        math_angle = math.radians(90.0 - instance.direction)
+        vx = math.cos(math_angle)
+        vy = math.sin(math_angle)
+        bounced = False
+        if x <= -half_w or x >= half_w:
+            vx = -vx
+            bounced = True
+            x = max(-half_w, min(half_w, x))
+        if y <= -half_h or y >= half_h:
+            vy = -vy
+            bounced = True
+            y = max(-half_h, min(half_h, y))
+        if bounced:
+            instance.x = x
+            instance.y = y
+            new_math_angle = math.atan2(vy, vx)
+            instance.direction = self._normalize_direction(90.0 - math.degrees(new_math_angle))

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime
 import math
 from typing import Any
 
@@ -83,6 +84,24 @@ def eval_expr(expr: Expr, vm_state: VMState, thread: ThreadState, vm: Any) -> An
     if kind == "list_contents":
         lst = target.local_lists.get(expr.value, vm_state.stage_lists.get(expr.value, []))
         return list_contents(lst)
+    if kind == "sensing_of":
+        return vm._sensing_of(thread.instance_id, expr.value["property"], eval_expr(expr.value["target"], vm_state, thread, vm))
+    if kind == "distance_to":
+        return vm._distance_to(thread.instance_id, eval_expr(expr.args[0], vm_state, thread, vm))
+    if kind == "loudness":
+        return 0
+    if kind == "current_time":
+        return _eval_current_time(str(expr.value))
+    if kind == "days_since_2000":
+        return _days_since_2000()
+    if kind == "username":
+        return ""
+    if kind == "touching_color":
+        return False
+    if kind == "color_touching_color":
+        return False
+    if kind == "volume":
+        return 100
 
     args = [eval_expr(arg, vm_state, thread, vm) for arg in expr.args]
     if kind == "operator_add":
@@ -160,4 +179,31 @@ def eval_expr(expr: Expr, vm_state: VMState, thread: ThreadState, vm: Any) -> An
         if op == "10 ^":
             return 10 ** value
     raise ValueError(f"Unsupported expression kind: {kind}")
+
+
+def _eval_current_time(component: str) -> int:
+    now = datetime.datetime.now()
+    c = component.upper()
+    if c == "YEAR":
+        return now.year
+    if c == "MONTH":
+        return now.month
+    if c == "DATE":
+        return now.day
+    if c == "DAYOFWEEK":
+        # Scratch: 1=Sunday … 7=Saturday; Python isoweekday: 1=Monday … 7=Sunday
+        return now.isoweekday() % 7 + 1
+    if c == "HOUR":
+        return now.hour
+    if c == "MINUTE":
+        return now.minute
+    if c == "SECOND":
+        return now.second
+    return 0
+
+
+def _days_since_2000() -> float:
+    epoch = datetime.datetime(2000, 1, 1)
+    delta = datetime.datetime.now() - epoch
+    return delta.total_seconds() / 86400.0
 

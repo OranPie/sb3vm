@@ -12,6 +12,7 @@ _LOGGER = get_logger(__name__)
 class Trigger:
     kind: str
     value: str | None = None
+    threshold: Any = None
 
 
 @dataclass

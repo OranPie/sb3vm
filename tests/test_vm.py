@@ -2031,3 +2031,340 @@ def test_inspect_test_sb3_has_no_unsupported_scripts():
 
     assert inspect["opcode_coverage"]["unsupported_by_opcode"] == {}
     assert inspect["unsupported_scripts"] == []
+
+
+# ---------------------------------------------------------------------------
+# New compatibility opcode tests
+# ---------------------------------------------------------------------------
+
+
+def test_control_wait_until_blocks_until_condition(tmp_path):
+    stage_blocks = {
+        "hat": {"opcode": "event_whenflagclicked", "next": "wu", "parent": None, "inputs": {}, "fields": {}, "topLevel": True},
+        "wu": {
+            "opcode": "control_wait_until",
+            "next": "done",
+            "parent": "hat",
+            "inputs": {"CONDITION": [2, "cond"]},
+            "fields": {},
+            "topLevel": False,
+        },
+        "cond": {
+            "opcode": "operator_gt",
+            "next": None,
+            "parent": "wu",
+            "inputs": {
+                "OPERAND1": [3, "var_ref"],
+                "OPERAND2": [1, [4, "5"]],
+            },
+            "fields": {},
+            "topLevel": False,
+        },
+        "var_ref": {"opcode": "data_variable", "next": None, "parent": "cond", "inputs": {}, "fields": {"VARIABLE": ["score", "v1"]}, "topLevel": False},
+        "done": {
+            "opcode": "data_setvariableto",
+            "next": None,
+            "parent": "wu",
+            "inputs": {"VALUE": [1, [4, "99"]]},
+            "fields": {"VARIABLE": ["done", "v2"]},
+            "topLevel": False,
+        },
+    }
+    hat2_blocks = {
+        "hat2": {"opcode": "event_whenflagclicked", "next": "inc", "parent": None, "inputs": {}, "fields": {}, "topLevel": True},
+        "inc": {
+            "opcode": "data_setvariableto",
+            "next": None,
+            "parent": "hat2",
+            "inputs": {"VALUE": [1, [4, "10"]]},
+            "fields": {"VARIABLE": ["score", "v1"]},
+            "topLevel": False,
+        },
+    }
+    project = _base_project(blocks_stage=stage_blocks | hat2_blocks)
+    path = tmp_path / "wait_until.sb3"
+    write_sb3(path, project)
+
+    vm = Sb3Vm(load_sb3(path))
+    vm.run_for(0.5)
+
+    snap = vm.snapshot()
+    assert snap["stage_variables"]["done"] == 99.0
+    assert snap["stage_variables"]["score"] == 10.0
+
+
+def test_motion_ifedgebounce_reflects_direction(tmp_path):
+    sprite_blocks = {
+        "hat": {"opcode": "event_whenflagclicked", "next": "bounce", "parent": None, "inputs": {}, "fields": {}, "topLevel": True},
+        "bounce": {"opcode": "motion_ifedgebounce", "next": None, "parent": "hat", "inputs": {}, "fields": {}, "topLevel": False},
+    }
+    project = _base_project(blocks_sprite=sprite_blocks)
+    project["targets"][1]["x"] = 260.0
+    project["targets"][1]["direction"] = 90.0
+    project["targets"][1]["costumes"] = [{"name": "one", "rotationCenterX": 5, "rotationCenterY": 5}]
+    path = tmp_path / "edge_bounce.sb3"
+    write_sb3(path, project)
+
+    vm = Sb3Vm(load_sb3(path))
+    vm.run_for(0.1)
+
+    snap = vm.snapshot()["targets"]["Sprite1"]
+    assert snap["x"] <= 240.0
+    assert snap["direction"] != 90.0
+
+
+def test_sensing_of_reads_sprite_position(tmp_path):
+    sprite2_blocks = {
+        "hat": {"opcode": "event_whenflagclicked", "next": "store", "parent": None, "inputs": {}, "fields": {}, "topLevel": True},
+        "store": {
+            "opcode": "data_setvariableto",
+            "next": None,
+            "parent": "hat",
+            "inputs": {"VALUE": [3, "of_expr"]},
+            "fields": {"VARIABLE": ["score", "v1"]},
+            "topLevel": False,
+        },
+        "of_expr": {
+            "opcode": "sensing_of",
+            "next": None,
+            "parent": "store",
+            "inputs": {"OBJECT": [1, "obj_menu"]},
+            "fields": {"PROPERTY": ["x position", None]},
+            "topLevel": False,
+        },
+        "obj_menu": {
+            "opcode": "sensing_of_object_menu",
+            "next": None,
+            "parent": "of_expr",
+            "inputs": {},
+            "fields": {"OBJECT": ["Sprite1", None]},
+            "topLevel": False,
+        },
+    }
+    project = _base_project(blocks_stage=sprite2_blocks)
+    project["targets"][1]["x"] = 55.0
+    path = tmp_path / "sensing_of.sb3"
+    write_sb3(path, project)
+
+    vm = Sb3Vm(load_sb3(path))
+    vm.run_for(0.1)
+
+    assert vm.snapshot()["stage_variables"]["score"] == 55.0
+
+
+def test_sensing_distanceto_returns_correct_distance(tmp_path):
+    sprite_blocks = {
+        "hat": {"opcode": "event_whenflagclicked", "next": "store", "parent": None, "inputs": {}, "fields": {}, "topLevel": True},
+        "store": {
+            "opcode": "data_setvariableto",
+            "next": None,
+            "parent": "hat",
+            "inputs": {"VALUE": [3, "dist_expr"]},
+            "fields": {"VARIABLE": ["score", "v1"]},
+            "topLevel": False,
+        },
+        "dist_expr": {
+            "opcode": "sensing_distanceto",
+            "next": None,
+            "parent": "store",
+            "inputs": {"DISTANCETOMENU": [1, "dist_menu"]},
+            "fields": {},
+            "topLevel": False,
+        },
+        "dist_menu": {
+            "opcode": "sensing_distancetomenu",
+            "next": None,
+            "parent": "dist_expr",
+            "inputs": {},
+            "fields": {"DISTANCETOMENU": ["_mouse_", None]},
+            "topLevel": False,
+        },
+    }
+    project = _base_project(blocks_sprite=sprite_blocks)
+    project["targets"][1]["x"] = 30.0
+    project["targets"][1]["y"] = 40.0
+    project["targets"][1]["variables"] = {"sv1": ["score", 0]}
+    path = tmp_path / "distanceto.sb3"
+    write_sb3(path, project)
+
+    provider = HeadlessInputProvider(mouse_x_value=30.0, mouse_y_value=40.0)
+    vm = Sb3Vm(load_sb3(path), input_provider=provider)
+    vm.run_for(0.1)
+
+    assert vm.snapshot()["targets"]["Sprite1"]["variables"]["score"] == 0.0
+
+
+def test_sensing_current_returns_int(tmp_path):
+    stage_blocks = {
+        "hat": {"opcode": "event_whenflagclicked", "next": "store", "parent": None, "inputs": {}, "fields": {}, "topLevel": True},
+        "store": {
+            "opcode": "data_setvariableto",
+            "next": None,
+            "parent": "hat",
+            "inputs": {"VALUE": [3, "cur_expr"]},
+            "fields": {"VARIABLE": ["score", "v1"]},
+            "topLevel": False,
+        },
+        "cur_expr": {
+            "opcode": "sensing_current",
+            "next": None,
+            "parent": "store",
+            "inputs": {},
+            "fields": {"CURRENTMENU": ["YEAR", None]},
+            "topLevel": False,
+        },
+    }
+    path = tmp_path / "current.sb3"
+    write_sb3(path, _base_project(blocks_stage=stage_blocks))
+
+    vm = Sb3Vm(load_sb3(path))
+    vm.run_for(0.1)
+
+    year = vm.snapshot()["stage_variables"]["score"]
+    assert isinstance(year, int)
+    assert year >= 2024
+
+
+def test_sensing_dayssince2000_returns_positive_float(tmp_path):
+    stage_blocks = {
+        "hat": {"opcode": "event_whenflagclicked", "next": "store", "parent": None, "inputs": {}, "fields": {}, "topLevel": True},
+        "store": {
+            "opcode": "data_setvariableto",
+            "next": None,
+            "parent": "hat",
+            "inputs": {"VALUE": [3, "days_expr"]},
+            "fields": {"VARIABLE": ["score", "v1"]},
+            "topLevel": False,
+        },
+        "days_expr": {
+            "opcode": "sensing_dayssince2000",
+            "next": None,
+            "parent": "store",
+            "inputs": {},
+            "fields": {},
+            "topLevel": False,
+        },
+    }
+    path = tmp_path / "dayssince2000.sb3"
+    write_sb3(path, _base_project(blocks_stage=stage_blocks))
+
+    vm = Sb3Vm(load_sb3(path))
+    vm.run_for(0.1)
+
+    days = vm.snapshot()["stage_variables"]["score"]
+    assert days > 9000
+
+
+def test_event_whengreaterthan_fires_on_timer_threshold(tmp_path):
+    stage_blocks = {
+        "hat": {
+            "opcode": "event_whengreaterthan",
+            "next": "set",
+            "parent": None,
+            "inputs": {"VALUE": [1, [4, "0.05"]]},
+            "fields": {"WHENGREATERTHANMENU": ["TIMER", None]},
+            "topLevel": True,
+        },
+        "set": {
+            "opcode": "data_setvariableto",
+            "next": None,
+            "parent": "hat",
+            "inputs": {"VALUE": [1, [4, "1"]]},
+            "fields": {"VARIABLE": ["done", "v2"]},
+            "topLevel": False,
+        },
+    }
+    path = tmp_path / "whengreaterthan.sb3"
+    write_sb3(path, _base_project(blocks_stage=stage_blocks))
+
+    vm = Sb3Vm(load_sb3(path))
+    vm.start_green_flag()
+    for _ in range(4):
+        vm.step(1 / 30)
+
+    assert vm.snapshot()["stage_variables"]["done"] == 1.0
+
+
+def test_sound_blocks_are_no_ops_and_not_unsupported(tmp_path):
+    stage_blocks = {
+        "hat": {"opcode": "event_whenflagclicked", "next": "snd", "parent": None, "inputs": {}, "fields": {}, "topLevel": True},
+        "snd": {
+            "opcode": "sound_play",
+            "next": "vol",
+            "parent": "hat",
+            "inputs": {"SOUND_MENU": [1, "smenu"]},
+            "fields": {},
+            "topLevel": False,
+        },
+        "smenu": {
+            "opcode": "sound_sounds_menu",
+            "next": None,
+            "parent": "snd",
+            "inputs": {},
+            "fields": {"SOUND_MENU": ["pop", None]},
+            "topLevel": False,
+        },
+        "vol": {
+            "opcode": "sound_setvolumeto",
+            "next": "set",
+            "parent": "snd",
+            "inputs": {"VOLUME": [1, [4, "80"]]},
+            "fields": {},
+            "topLevel": False,
+        },
+        "set": {
+            "opcode": "data_setvariableto",
+            "next": None,
+            "parent": "vol",
+            "inputs": {"VALUE": [1, [4, "7"]]},
+            "fields": {"VARIABLE": ["score", "v1"]},
+            "topLevel": False,
+        },
+    }
+    path = tmp_path / "sound_noop.sb3"
+    write_sb3(path, _base_project(blocks_stage=stage_blocks))
+
+    vm = Sb3Vm(load_sb3(path))
+    vm.run_for(0.1)
+
+    snap = vm.snapshot()
+    assert snap["stage_variables"]["score"] == 7.0
+    assert vm.inspect()["unsupported_scripts"] == []
+
+
+def test_data_show_hide_variable_are_no_ops(tmp_path):
+    stage_blocks = {
+        "hat": {"opcode": "event_whenflagclicked", "next": "show", "parent": None, "inputs": {}, "fields": {}, "topLevel": True},
+        "show": {
+            "opcode": "data_showvariable",
+            "next": "hide",
+            "parent": "hat",
+            "inputs": {},
+            "fields": {"VARIABLE": ["score", "v1"]},
+            "topLevel": False,
+        },
+        "hide": {
+            "opcode": "data_hidevariable",
+            "next": "set",
+            "parent": "show",
+            "inputs": {},
+            "fields": {"VARIABLE": ["score", "v1"]},
+            "topLevel": False,
+        },
+        "set": {
+            "opcode": "data_setvariableto",
+            "next": None,
+            "parent": "hide",
+            "inputs": {"VALUE": [1, [4, "3"]]},
+            "fields": {"VARIABLE": ["score", "v1"]},
+            "topLevel": False,
+        },
+    }
+    path = tmp_path / "show_hide.sb3"
+    write_sb3(path, _base_project(blocks_stage=stage_blocks))
+
+    vm = Sb3Vm(load_sb3(path))
+    vm.run_for(0.1)
+
+    assert vm.snapshot()["stage_variables"]["score"] == 3.0
+    assert vm.inspect()["unsupported_scripts"] == []

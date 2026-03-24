@@ -20,6 +20,7 @@ SUPPORTED_EVENT_OPS = {
     "event_whenbroadcastreceived",
     "event_whenthisspriteclicked",
     "control_start_as_clone",
+    "event_whengreaterthan",
 }
 
 ARG_REPORTER_OPS = {
@@ -55,6 +56,17 @@ SUPPORTED_EXPR_OPS = {
     "sensing_mousedown",
     "sensing_touchingobject",
     "sensing_touchingobjectmenu",
+    "sensing_of",
+    "sensing_of_object_menu",
+    "sensing_distanceto",
+    "sensing_distancetomenu",
+    "sensing_loudness",
+    "sensing_current",
+    "sensing_dayssince2000",
+    "sensing_username",
+    "sensing_touchingcolor",
+    "sensing_coloristouchingcolor",
+    "sound_volume",
     "motion_xposition",
     "motion_yposition",
     "motion_direction",
@@ -125,6 +137,22 @@ SUPPORTED_STMT_OPS = {
     "control_delete_this_clone",
     "sensing_askandwait",
     "sensing_resettimer",
+    "sensing_setdragmode",
+    "control_wait_until",
+    "motion_ifedgebounce",
+    "sound_play",
+    "sound_playuntildone",
+    "sound_stopallsounds",
+    "sound_setvolumeto",
+    "sound_changevolumeby",
+    "sound_seteffectto",
+    "sound_changeeffectby",
+    "sound_cleareffects",
+    "sound_sounds_menu",
+    "data_showvariable",
+    "data_hidevariable",
+    "data_showlist",
+    "data_hidelist",
     "music_playNoteForBeats",
 }
 
@@ -185,7 +213,7 @@ class ProjectParser:
                     continue
                 if opcode not in SUPPORTED_EVENT_OPS:
                     continue
-                trigger = self.parse_trigger(block)
+                trigger = self.parse_trigger(target, block_id, block)
                 body = self.parse_stmt_chain(target, block.get("next"))
                 script = Script(target_name=target.name, trigger=trigger, body=body)
                 unsupported = self.find_unsupported(script)
@@ -326,7 +354,7 @@ class ProjectParser:
             block_id=block_id,
         )
 
-    def parse_trigger(self, block: dict[str, Any]) -> Trigger:
+    def parse_trigger(self, target: "Target", block_id: str, block: dict[str, Any]) -> Trigger:
         opcode = block.get("opcode")
         if opcode == "event_whenflagclicked":
             return Trigger("green_flag")
@@ -340,6 +368,10 @@ class ProjectParser:
             return Trigger("sprite_clicked")
         if opcode == "control_start_as_clone":
             return Trigger("clone_start")
+        if opcode == "event_whengreaterthan":
+            menu = (self.field_value(block, "WHENGREATERTHANMENU") or "").upper()
+            threshold_expr = self.parse_input_expr(target, block_id, block, "VALUE")
+            return Trigger("greater_than", menu, threshold=threshold_expr)
         return Trigger("unknown")
 
     def parse_stmt_chain(
@@ -489,6 +521,19 @@ class ProjectParser:
             return Stmt("ask", {"prompt": expr("QUESTION")})
         if opcode == "sensing_resettimer":
             return Stmt("reset_timer", {})
+        if opcode == "control_wait_until":
+            return Stmt("wait_until", {"condition": expr("CONDITION")})
+        if opcode == "motion_ifedgebounce":
+            return Stmt("move_state", {"mode": "if_edge_bounce"})
+        if opcode in {
+            "sound_play", "sound_playuntildone", "sound_stopallsounds",
+            "sound_setvolumeto", "sound_changevolumeby",
+            "sound_seteffectto", "sound_changeeffectby", "sound_cleareffects",
+            "sound_sounds_menu",
+            "data_showvariable", "data_hidevariable", "data_showlist", "data_hidelist",
+            "sensing_setdragmode",
+        }:
+            return Stmt("no_op", {})
         if opcode == "music_playNoteForBeats":
             return Stmt("music_play_note", {"note": expr("NOTE"), "beats": expr("BEATS")})
         return Stmt("unsupported", {"opcode": opcode, "block_id": block_id})
@@ -668,6 +713,35 @@ class ProjectParser:
             return Expr("touching_object", args=[self.parse_input_expr(target, block_id, block, "TOUCHINGOBJECTMENU", procedure_args=procedure_args)])
         if opcode == "sensing_touchingobjectmenu":
             return Expr("literal", self.field_value(block, "TOUCHINGOBJECTMENU") or "")
+        if opcode == "sensing_of":
+            prop = self.field_value(block, "PROPERTY") or ""
+            target_expr = self.parse_input_expr(target, block_id, block, "OBJECT", procedure_args=procedure_args)
+            return Expr("sensing_of", {"property": prop, "target": target_expr})
+        if opcode == "sensing_of_object_menu":
+            return Expr("literal", self.field_value(block, "OBJECT") or "")
+        if opcode == "sensing_distanceto":
+            target_expr = self.parse_input_expr(target, block_id, block, "DISTANCETOMENU", procedure_args=procedure_args)
+            return Expr("distance_to", args=[target_expr])
+        if opcode == "sensing_distancetomenu":
+            return Expr("literal", self.field_value(block, "DISTANCETOMENU") or "")
+        if opcode == "sensing_loudness":
+            return Expr("loudness")
+        if opcode == "sensing_current":
+            component = (self.field_value(block, "CURRENTMENU") or "YEAR").upper()
+            return Expr("current_time", component)
+        if opcode == "sensing_dayssince2000":
+            return Expr("days_since_2000")
+        if opcode == "sensing_username":
+            return Expr("username")
+        if opcode == "sensing_touchingcolor":
+            return Expr("touching_color", args=[self.parse_input_expr(target, block_id, block, "COLOR", procedure_args=procedure_args)])
+        if opcode == "sensing_coloristouchingcolor":
+            return Expr("color_touching_color", args=[
+                self.parse_input_expr(target, block_id, block, "COLOR", procedure_args=procedure_args),
+                self.parse_input_expr(target, block_id, block, "COLOR2", procedure_args=procedure_args),
+            ])
+        if opcode == "sound_volume":
+            return Expr("volume")
         if opcode == "motion_xposition":
             return Expr("x_position")
         if opcode == "motion_yposition":
