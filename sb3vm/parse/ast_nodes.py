@@ -74,6 +74,27 @@ class UnsupportedDiagnostic:
 
 
 @dataclass
+class GracefulExtDiagnostic:
+    """Diagnostic for an extension block that was handled gracefully (no-op / default)."""
+    target_name: str
+    trigger_kind: str
+    trigger_value: str | None
+    node_kind: str  # "statement" or "expression"
+    opcode: str
+    block_id: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "target": self.target_name,
+            "trigger": self.trigger_kind,
+            "value": self.trigger_value,
+            "node_kind": self.node_kind,
+            "opcode": self.opcode,
+            "block_id": self.block_id,
+        }
+
+
+@dataclass
 class RuntimeDiagnostic:
     kind: str
     message: str
@@ -107,4 +128,5 @@ class Script:
     body: list[Stmt]
     supported: bool = True
     unsupported_details: list[UnsupportedDiagnostic] = field(default_factory=list)
+    graceful_ext_details: list[GracefulExtDiagnostic] = field(default_factory=list)
 

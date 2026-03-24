@@ -13,6 +13,14 @@ translate) is handled here.  Headless behaviour:
                   setters are no-ops.
 * **translate** – getTranslate returns the original text unchanged;
                   getViewerLanguage returns "en".
+
+TurboWarp built-in extensions:
+
+* **tw**               – isPaused/isTurboModeEnabled → False; getLastKeyPressed
+                  → ""; log/warn/error → no-ops.
+* **runtime_options**  – getFPS → 30; getCloneLimit → 300; getStageWidth → 480;
+                  getStageHeight → 360; all boolean getters → False; all setters
+                  and frameCount → no-ops / 0.
 """
 from __future__ import annotations
 
@@ -49,6 +57,23 @@ EXT_EXPR_OPS: set[str] = {
     "translate_getTranslate",
     "translate_getViewerLanguage",
     "translate_menu_languages",
+    # TurboWarp built-ins
+    "tw_getLastKeyPressed",
+    "tw_isTurboModeEnabled",
+    "tw_isPaused",
+    "tw_counter",
+    "tw_menu_TARGET",
+    # TurboWarp runtime_options reporters
+    "runtime_options_getFPS",
+    "runtime_options_getCloneLimit",
+    "runtime_options_getStageWidth",
+    "runtime_options_getStageHeight",
+    "runtime_options_isInfiniteClonesEnabled",
+    "runtime_options_getFrameCount",
+    "runtime_options_isFrameCountEnabled",
+    "runtime_options_isHighQualityPenEnabled",
+    "runtime_options_isWarpTimerEnabled",
+    "runtime_options_isInterpolationEnabled",
 }
 
 EXT_STMT_OPS: set[str] = {
@@ -79,6 +104,22 @@ EXT_STMT_OPS: set[str] = {
     "text2speech_speakAndWait",
     "text2speech_setVoice",
     "text2speech_setLanguage",
+    # TurboWarp built-ins
+    "tw_log",
+    "tw_warn",
+    "tw_error",
+    "tw_setCustomFPS",
+    "tw_setCounter",
+    "tw_incrementCounter",
+    # TurboWarp runtime_options setters
+    "runtime_options_setFPS",
+    "runtime_options_setCloneLimit",
+    "runtime_options_setInfiniteClonesEnabled",
+    "runtime_options_setFrameCountEnabled",
+    "runtime_options_setHighQualityPenEnabled",
+    "runtime_options_setWarpTimerEnabled",
+    "runtime_options_setInterpolationEnabled",
+    "runtime_options_setRemoveLimitsEnabled",
 }
 
 # ---------------------------------------------------------------------------
@@ -111,6 +152,13 @@ def parse_ext_stmt(
         return Stmt("no_op", {})
     # ---- Text2Speech -------------------------------------------------------
     if opcode in {"text2speech_speakAndWait", "text2speech_setVoice", "text2speech_setLanguage"}:
+        return Stmt("no_op", {})
+    # ---- TurboWarp tw_ (all no-ops in headless) ----------------------------
+    if opcode in {"tw_log", "tw_warn", "tw_error", "tw_setCustomFPS",
+                  "tw_setCounter", "tw_incrementCounter"}:
+        return Stmt("no_op", {})
+    # ---- TurboWarp runtime_options (all setters are no-ops) ----------------
+    if opcode in EXT_STMT_OPS and opcode.startswith("runtime_options_"):
         return Stmt("no_op", {})
     return None
 
@@ -156,6 +204,34 @@ def parse_ext_expr(
         return Expr("viewer_language")
     if opcode == "translate_menu_languages":
         return Expr("literal", field_fn(block, "languages") or "")
+    # ---- TurboWarp tw_ reporters ------------------------------------------
+    if opcode == "tw_getLastKeyPressed":
+        return Expr("literal", "")
+    if opcode in {"tw_isTurboModeEnabled", "tw_isPaused"}:
+        return Expr("literal", False)
+    if opcode == "tw_counter":
+        return Expr("literal", 0)
+    if opcode == "tw_menu_TARGET":
+        return Expr("literal", field_fn(block, "TARGET") or "")
+    # ---- TurboWarp runtime_options reporters ------------------------------
+    if opcode == "runtime_options_getFPS":
+        return Expr("literal", 30)
+    if opcode == "runtime_options_getCloneLimit":
+        return Expr("literal", 300)
+    if opcode == "runtime_options_getStageWidth":
+        return Expr("literal", 480)
+    if opcode == "runtime_options_getStageHeight":
+        return Expr("literal", 360)
+    if opcode in {
+        "runtime_options_isInfiniteClonesEnabled",
+        "runtime_options_isFrameCountEnabled",
+        "runtime_options_isHighQualityPenEnabled",
+        "runtime_options_isWarpTimerEnabled",
+        "runtime_options_isInterpolationEnabled",
+    }:
+        return Expr("literal", False)
+    if opcode == "runtime_options_getFrameCount":
+        return Expr("literal", 0)
     return None
 
 
@@ -176,6 +252,9 @@ def eval_ext_expr(kind: str, expr: Any, vm_state: Any, thread: Any, vm: Any) -> 
         return to_string(eval_expr(expr.value["text"], vm_state, thread, vm))
     if kind == "viewer_language":
         return "en"
+    if kind == "graceful_ext":
+        # Unknown custom extension expression – return safe default.
+        return ""
     raise ValueError(f"Unsupported extension expression kind: {kind}")
 
 
@@ -211,3 +290,4 @@ def exec_ext_stmt(kind: str, stmt: Any, thread: Any, vm: Any) -> str | None:
         vm.state.music_tempo = max(20.0, min(500.0, vm.state.music_tempo + delta))
         return None
     raise ValueError(f"Unsupported extension statement kind: {kind}")
+

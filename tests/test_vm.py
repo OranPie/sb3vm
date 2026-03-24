@@ -2827,3 +2827,394 @@ def test_extension_stmts_compile_and_run(tmp_path):
     assert vm.state.stage_variables["done"] == 1
     assert vm.state.music_tempo == 200.0
     assert vm.inspect()["unsupported_scripts"] == []
+
+
+# ---------------------------------------------------------------------------
+# TurboWarp built-in extension tests
+# ---------------------------------------------------------------------------
+
+def test_tw_is_paused_returns_false(tmp_path):
+    """tw_isPaused returns False in headless mode."""
+    stage_blocks = {
+        "hat": {"opcode": "event_whenflagclicked", "next": "store", "parent": None, "inputs": {}, "fields": {}, "topLevel": True},
+        "store": {
+            "opcode": "data_setvariableto",
+            "next": None,
+            "parent": "hat",
+            "inputs": {"VALUE": [1, "tw_expr"]},
+            "fields": {"VARIABLE": ["score", "v1"]},
+            "topLevel": False,
+        },
+        "tw_expr": {
+            "opcode": "tw_isPaused",
+            "next": None,
+            "parent": "store",
+            "inputs": {},
+            "fields": {},
+            "topLevel": False,
+        },
+    }
+    path = tmp_path / "tw_paused.sb3"
+    write_sb3(path, _base_project(blocks_stage=stage_blocks))
+
+    vm = Sb3Vm(load_sb3(path))
+    vm.run_for(0.1)
+
+    assert vm.state.stage_variables["score"] == False
+    assert vm.inspect()["unsupported_scripts"] == []
+
+
+def test_tw_is_turbo_mode_returns_false(tmp_path):
+    """tw_isTurboModeEnabled returns False (no JIT in this VM)."""
+    stage_blocks = {
+        "hat": {"opcode": "event_whenflagclicked", "next": "store", "parent": None, "inputs": {}, "fields": {}, "topLevel": True},
+        "store": {
+            "opcode": "data_setvariableto",
+            "next": None,
+            "parent": "hat",
+            "inputs": {"VALUE": [1, "tw_expr"]},
+            "fields": {"VARIABLE": ["score", "v1"]},
+            "topLevel": False,
+        },
+        "tw_expr": {
+            "opcode": "tw_isTurboModeEnabled",
+            "next": None,
+            "parent": "store",
+            "inputs": {},
+            "fields": {},
+            "topLevel": False,
+        },
+    }
+    path = tmp_path / "tw_turbo.sb3"
+    write_sb3(path, _base_project(blocks_stage=stage_blocks))
+
+    vm = Sb3Vm(load_sb3(path))
+    vm.run_for(0.1)
+
+    assert vm.state.stage_variables["score"] == False
+    assert vm.inspect()["unsupported_scripts"] == []
+
+
+def test_tw_log_is_no_op(tmp_path):
+    """tw_log/warn/error are no-ops that don't block execution."""
+    stage_blocks = {
+        "hat": {"opcode": "event_whenflagclicked", "next": "log", "parent": None, "inputs": {}, "fields": {}, "topLevel": True},
+        "log": {
+            "opcode": "tw_log",
+            "next": "warn",
+            "parent": "hat",
+            "inputs": {"INPUT": [1, [10, "hello"]]},
+            "fields": {},
+            "topLevel": False,
+        },
+        "warn": {
+            "opcode": "tw_warn",
+            "next": "err",
+            "parent": "log",
+            "inputs": {"INPUT": [1, [10, "warn"]]},
+            "fields": {},
+            "topLevel": False,
+        },
+        "err": {
+            "opcode": "tw_error",
+            "next": "done",
+            "parent": "warn",
+            "inputs": {"INPUT": [1, [10, "err"]]},
+            "fields": {},
+            "topLevel": False,
+        },
+        "done": {
+            "opcode": "data_setvariableto",
+            "next": None,
+            "parent": "err",
+            "inputs": {"VALUE": [1, [4, "1"]]},
+            "fields": {"VARIABLE": ["done", "v2"]},
+            "topLevel": False,
+        },
+    }
+    path = tmp_path / "tw_log.sb3"
+    write_sb3(path, _base_project(blocks_stage=stage_blocks))
+
+    vm = Sb3Vm(load_sb3(path))
+    vm.run_for(0.3)
+
+    assert vm.state.stage_variables["done"] == 1
+    assert vm.inspect()["unsupported_scripts"] == []
+
+
+def test_runtime_options_get_fps_returns_30(tmp_path):
+    """runtime_options_getFPS returns 30 in headless mode."""
+    stage_blocks = {
+        "hat": {"opcode": "event_whenflagclicked", "next": "store", "parent": None, "inputs": {}, "fields": {}, "topLevel": True},
+        "store": {
+            "opcode": "data_setvariableto",
+            "next": None,
+            "parent": "hat",
+            "inputs": {"VALUE": [1, "fps_expr"]},
+            "fields": {"VARIABLE": ["score", "v1"]},
+            "topLevel": False,
+        },
+        "fps_expr": {
+            "opcode": "runtime_options_getFPS",
+            "next": None,
+            "parent": "store",
+            "inputs": {},
+            "fields": {},
+            "topLevel": False,
+        },
+    }
+    path = tmp_path / "rt_fps.sb3"
+    write_sb3(path, _base_project(blocks_stage=stage_blocks))
+
+    vm = Sb3Vm(load_sb3(path))
+    vm.run_for(0.1)
+
+    assert vm.state.stage_variables["score"] == 30
+    assert vm.inspect()["unsupported_scripts"] == []
+
+
+def test_runtime_options_stage_dimensions(tmp_path):
+    """runtime_options_getStageWidth/Height return 480/360."""
+    stage_blocks = {
+        "hat": {"opcode": "event_whenflagclicked", "next": "store_w", "parent": None, "inputs": {}, "fields": {}, "topLevel": True},
+        "store_w": {
+            "opcode": "data_setvariableto",
+            "next": "store_h",
+            "parent": "hat",
+            "inputs": {"VALUE": [1, "width_expr"]},
+            "fields": {"VARIABLE": ["score", "v1"]},
+            "topLevel": False,
+        },
+        "width_expr": {
+            "opcode": "runtime_options_getStageWidth",
+            "next": None,
+            "parent": "store_w",
+            "inputs": {},
+            "fields": {},
+            "topLevel": False,
+        },
+        "store_h": {
+            "opcode": "data_setvariableto",
+            "next": None,
+            "parent": "store_w",
+            "inputs": {"VALUE": [1, "height_expr"]},
+            "fields": {"VARIABLE": ["done", "v2"]},
+            "topLevel": False,
+        },
+        "height_expr": {
+            "opcode": "runtime_options_getStageHeight",
+            "next": None,
+            "parent": "store_h",
+            "inputs": {},
+            "fields": {},
+            "topLevel": False,
+        },
+    }
+    path = tmp_path / "rt_dims.sb3"
+    write_sb3(path, _base_project(blocks_stage=stage_blocks))
+
+    vm = Sb3Vm(load_sb3(path))
+    vm.run_for(0.2)
+
+    assert vm.state.stage_variables["score"] == 480
+    assert vm.state.stage_variables["done"] == 360
+    assert vm.inspect()["unsupported_scripts"] == []
+
+
+def test_runtime_options_set_fps_is_no_op(tmp_path):
+    """runtime_options_setFPS is a no-op that doesn't block the script."""
+    stage_blocks = {
+        "hat": {"opcode": "event_whenflagclicked", "next": "set_fps", "parent": None, "inputs": {}, "fields": {}, "topLevel": True},
+        "set_fps": {
+            "opcode": "runtime_options_setFPS",
+            "next": "done",
+            "parent": "hat",
+            "inputs": {"FPS": [1, [4, "60"]]},
+            "fields": {},
+            "topLevel": False,
+        },
+        "done": {
+            "opcode": "data_setvariableto",
+            "next": None,
+            "parent": "set_fps",
+            "inputs": {"VALUE": [1, [4, "1"]]},
+            "fields": {"VARIABLE": ["done", "v2"]},
+            "topLevel": False,
+        },
+    }
+    path = tmp_path / "rt_set_fps.sb3"
+    write_sb3(path, _base_project(blocks_stage=stage_blocks))
+
+    vm = Sb3Vm(load_sb3(path))
+    vm.run_for(0.1)
+
+    assert vm.state.stage_variables["done"] == 1
+    assert vm.inspect()["unsupported_scripts"] == []
+
+
+# ---------------------------------------------------------------------------
+# Custom / third-party extension graceful fallback tests
+# ---------------------------------------------------------------------------
+
+def test_unknown_ext_stmt_runs_gracefully(tmp_path):
+    """An unknown third-party extension command runs as a no-op; script is NOT unsupported."""
+    stage_blocks = {
+        "hat": {"opcode": "event_whenflagclicked", "next": "custom_cmd", "parent": None, "inputs": {}, "fields": {}, "topLevel": True},
+        "custom_cmd": {
+            "opcode": "myCustomExt_doSomething",
+            "next": "done",
+            "parent": "hat",
+            "inputs": {},
+            "fields": {},
+            "topLevel": False,
+        },
+        "done": {
+            "opcode": "data_setvariableto",
+            "next": None,
+            "parent": "custom_cmd",
+            "inputs": {"VALUE": [1, [4, "1"]]},
+            "fields": {"VARIABLE": ["done", "v2"]},
+            "topLevel": False,
+        },
+    }
+    path = tmp_path / "custom_ext.sb3"
+    write_sb3(path, _base_project(blocks_stage=stage_blocks))
+
+    vm = Sb3Vm(load_sb3(path))
+    vm.run_for(0.1)
+
+    assert vm.state.stage_variables["done"] == 1
+    assert vm.inspect()["unsupported_scripts"] == []
+    graceful = vm.inspect()["graceful_ext_scripts"]
+    assert len(graceful) == 1
+    assert "myCustomExt_doSomething" in graceful[0]["opcodes"]
+
+
+def test_unknown_ext_reporter_returns_empty_string(tmp_path):
+    """An unknown third-party extension reporter returns '' and is tracked as graceful."""
+    stage_blocks = {
+        "hat": {"opcode": "event_whenflagclicked", "next": "store", "parent": None, "inputs": {}, "fields": {}, "topLevel": True},
+        "store": {
+            "opcode": "data_setvariableto",
+            "next": None,
+            "parent": "hat",
+            "inputs": {"VALUE": [1, "custom_expr"]},
+            "fields": {"VARIABLE": ["score", "v1"]},
+            "topLevel": False,
+        },
+        "custom_expr": {
+            "opcode": "myExt_getValue",
+            "next": None,
+            "parent": "store",
+            "inputs": {},
+            "fields": {},
+            "topLevel": False,
+        },
+    }
+    path = tmp_path / "custom_reporter.sb3"
+    write_sb3(path, _base_project(blocks_stage=stage_blocks))
+
+    vm = Sb3Vm(load_sb3(path))
+    vm.run_for(0.1)
+
+    assert vm.state.stage_variables["score"] == ""
+    assert vm.inspect()["unsupported_scripts"] == []
+    graceful = vm.inspect()["graceful_ext_scripts"]
+    assert len(graceful) == 1
+    assert "myExt_getValue" in graceful[0]["opcodes"]
+
+
+def test_known_hardware_ext_remains_unsupported(tmp_path):
+    """gdxfor (hardware sensor) blocks remain unsupported — script is blocked."""
+    stage_blocks = {
+        "hat": {"opcode": "event_whenflagclicked", "next": "hw", "parent": None, "inputs": {}, "fields": {}, "topLevel": True},
+        "hw": {
+            "opcode": "gdxfor_getAcceleration",
+            "next": None,
+            "parent": "hat",
+            "inputs": {},
+            "fields": {},
+            "topLevel": False,
+        },
+    }
+    path = tmp_path / "hardware_ext.sb3"
+    write_sb3(path, _base_project(blocks_stage=stage_blocks))
+
+    vm = Sb3Vm(load_sb3(path))
+    vm.run_for(0.1)
+
+    assert vm.inspect()["unsupported_scripts"] != []
+    assert vm.inspect()["unsupported_scripts"][0]["opcode"] == "gdxfor_getAcceleration"
+    assert vm.inspect()["graceful_ext_scripts"] == []
+
+
+def test_graceful_ext_opcode_coverage_tracked_separately(tmp_path):
+    """Custom extension opcodes appear in graceful_by_opcode, not unsupported_by_opcode."""
+    stage_blocks = {
+        "hat": {"opcode": "event_whenflagclicked", "next": "custom", "parent": None, "inputs": {}, "fields": {}, "topLevel": True},
+        "custom": {
+            "opcode": "thirdParty_action",
+            "next": None,
+            "parent": "hat",
+            "inputs": {},
+            "fields": {},
+            "topLevel": False,
+        },
+    }
+    path = tmp_path / "graceful_coverage.sb3"
+    write_sb3(path, _base_project(blocks_stage=stage_blocks))
+
+    vm = Sb3Vm(load_sb3(path))
+    vm.run_for(0.1)
+
+    cov = vm.inspect()["opcode_coverage"]
+    assert "thirdParty_action" in cov["graceful_by_opcode"]
+    assert "thirdParty_action" not in cov.get("unsupported_by_opcode", {})
+
+
+def test_tw_ext_compiles_and_runs(tmp_path):
+    """TurboWarp built-in blocks are accepted by the JIT compiler."""
+    stage_blocks = {
+        "hat": {"opcode": "event_whenflagclicked", "next": "is_paused", "parent": None, "inputs": {}, "fields": {}, "topLevel": True},
+        "is_paused": {
+            "opcode": "data_setvariableto",
+            "next": "set_fps",
+            "parent": "hat",
+            "inputs": {"VALUE": [1, "tw_paused"]},
+            "fields": {"VARIABLE": ["score", "v1"]},
+            "topLevel": False,
+        },
+        "tw_paused": {
+            "opcode": "tw_isPaused",
+            "next": None,
+            "parent": "is_paused",
+            "inputs": {},
+            "fields": {},
+            "topLevel": False,
+        },
+        "set_fps": {
+            "opcode": "runtime_options_setFPS",
+            "next": "done",
+            "parent": "is_paused",
+            "inputs": {"FPS": [1, [4, "60"]]},
+            "fields": {},
+            "topLevel": False,
+        },
+        "done": {
+            "opcode": "data_setvariableto",
+            "next": None,
+            "parent": "set_fps",
+            "inputs": {"VALUE": [1, [4, "1"]]},
+            "fields": {"VARIABLE": ["done", "v2"]},
+            "topLevel": False,
+        },
+    }
+    path = tmp_path / "tw_compiled.sb3"
+    write_sb3(path, _base_project(blocks_stage=stage_blocks))
+
+    vm = Sb3Vm(load_sb3(path), enable_compilation=True, lazy_compile_threshold=1)
+    vm.run_for(0.3)
+
+    assert vm.state.stage_variables["done"] == 1
+    assert vm.state.stage_variables["score"] == False
+    assert vm.inspect()["unsupported_scripts"] == []

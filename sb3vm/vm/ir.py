@@ -63,6 +63,8 @@ SAFE_EXPR_KINDS = {
     "video_sensing",
     "translate",
     "viewer_language",
+    # Graceful custom-extension fallback
+    "graceful_ext",
 }
 
 SAFE_STMT_KINDS = {
@@ -75,6 +77,7 @@ SAFE_STMT_KINDS = {
     "list_replace",
     "wait",
     "no_op",
+    "graceful_ext",
     "music_play_note",
     "music_play_drum",
     "music_rest",

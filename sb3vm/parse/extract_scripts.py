@@ -7,7 +7,7 @@ from typing import Any
 
 from sb3vm.log import debug, get_logger, info, warn
 from sb3vm.model.project import Project, Target
-from sb3vm.parse.ast_nodes import Expr, ProcedureDefinition, Script, Stmt, Trigger, UnsupportedDiagnostic
+from sb3vm.parse.ast_nodes import Expr, GracefulExtDiagnostic, ProcedureDefinition, Script, Stmt, Trigger, UnsupportedDiagnostic
 from sb3vm.vm.errors import ProjectValidationError
 from sb3vm.vm.extensions import EXT_EVENT_OPS, EXT_EXPR_OPS, EXT_STMT_OPS, parse_ext_expr, parse_ext_stmt
 
@@ -173,22 +173,27 @@ class ParseResult:
     opcode_histogram: Counter[str]
     supported_opcode_histogram: Counter[str]
     unsupported_opcode_histogram: Counter[str]
+    graceful_opcode_histogram: Counter[str]
     diagnostics: list[UnsupportedDiagnostic] = field(default_factory=list)
 
     def opcode_coverage(self) -> dict[str, Any]:
         all_opcodes = sorted(self.opcode_histogram)
         supported = {opcode: self.supported_opcode_histogram[opcode] for opcode in sorted(self.supported_opcode_histogram)}
         unsupported = {opcode: self.unsupported_opcode_histogram[opcode] for opcode in sorted(self.unsupported_opcode_histogram)}
+        graceful = {opcode: self.graceful_opcode_histogram[opcode] for opcode in sorted(self.graceful_opcode_histogram)}
         return {
             "total_seen": sum(self.opcode_histogram.values()),
             "supported_seen": sum(self.supported_opcode_histogram.values()),
             "unsupported_seen": sum(self.unsupported_opcode_histogram.values()),
+            "graceful_seen": sum(self.graceful_opcode_histogram.values()),
             "unique_total": len(all_opcodes),
             "unique_supported": len(supported),
             "unique_unsupported": len(unsupported),
+            "unique_graceful": len(graceful),
             "by_opcode": {opcode: self.opcode_histogram[opcode] for opcode in all_opcodes},
             "supported_by_opcode": supported,
             "unsupported_by_opcode": unsupported,
+            "graceful_by_opcode": graceful,
         }
 
 
@@ -199,11 +204,18 @@ def extract_scripts(project: Project) -> ParseResult:
 
 
 class ProjectParser:
+    # Namespaces of known hardware/device extensions that cannot run headlessly.
+    # Unknown opcodes whose namespace is NOT in this set fall back gracefully.
+    _KNOWN_UNSUPPORTED_EXT_PREFIXES: frozenset[str] = frozenset({
+        "gdxfor", "boost", "wedo2", "microbit", "ev3", "lego",
+    })
+
     def __init__(self, project: Project) -> None:
         self.project = project
         self.opcode_histogram: Counter[str] = Counter()
         self.supported_opcode_histogram: Counter[str] = Counter()
         self.unsupported_opcode_histogram: Counter[str] = Counter()
+        self.graceful_opcode_histogram: Counter[str] = Counter()
         self.procedures_by_target: dict[str, dict[str, ProcedureDefinition]] = {}
         self.diagnostics: list[UnsupportedDiagnostic] = []
 
@@ -249,6 +261,9 @@ class ProjectParser:
                         trigger.kind,
                         len(unsupported),
                     )
+                graceful = self.find_graceful_ext(script)
+                if graceful:
+                    script.graceful_ext_details = graceful
                 scripts.append(script)
 
         procedures = [
@@ -262,6 +277,7 @@ class ProjectParser:
             opcode_histogram=self.opcode_histogram,
             supported_opcode_histogram=self.supported_opcode_histogram,
             unsupported_opcode_histogram=self.unsupported_opcode_histogram,
+            graceful_opcode_histogram=self.graceful_opcode_histogram,
             diagnostics=list(self.diagnostics),
         )
         info(
@@ -275,6 +291,13 @@ class ProjectParser:
         )
         return result
 
+    def _is_graceful_ext_opcode(self, opcode: str) -> bool:
+        """True if opcode is an unknown custom/third-party extension that can run gracefully."""
+        if "_" not in opcode:
+            return False
+        prefix = opcode.split("_", 1)[0]
+        return prefix not in self._KNOWN_UNSUPPORTED_EXT_PREFIXES
+
     def _collect_opcodes(self, target: Target) -> None:
         for block_id, block in target.blocks.items():
             self._validate_block_record(target, block_id, block)
@@ -287,6 +310,8 @@ class ProjectParser:
                 "procedures_prototype",
             }:
                 self.supported_opcode_histogram[opcode] += 1
+            elif self._is_graceful_ext_opcode(opcode):
+                self.graceful_opcode_histogram[opcode] += 1
             else:
                 self.unsupported_opcode_histogram[opcode] += 1
 
@@ -550,6 +575,8 @@ class ProjectParser:
         ext = parse_ext_stmt(opcode, block, expr, f)
         if ext is not None:
             return ext
+        if self._is_graceful_ext_opcode(opcode):
+            return Stmt("graceful_ext", {"opcode": opcode, "block_id": block_id})
         return Stmt("unsupported", {"opcode": opcode, "block_id": block_id})
 
     def parse_procedure_call(
@@ -791,6 +818,8 @@ class ProjectParser:
         ext = parse_ext_expr(opcode, block, lambda key: self.parse_input_expr(target, block_id, block, key, procedure_args=procedure_args), self.field_value)
         if ext is not None:
             return ext
+        if self._is_graceful_ext_opcode(opcode):
+            return Expr("graceful_ext", opcode)
         return Expr("unsupported", opcode)
 
     def parse_clone_selector(
@@ -900,6 +929,61 @@ class ProjectParser:
         for stmt in script.body:
             visit_stmt(stmt)
         unique: dict[tuple[str, str, str | None], UnsupportedDiagnostic] = {}
+        for item in reasons:
+            unique[(item.node_kind, item.opcode, item.block_id)] = item
+        return [unique[key] for key in sorted(unique)]
+
+    def find_graceful_ext(self, script: Script) -> list[GracefulExtDiagnostic]:
+        """Walk a Script's AST and collect graceful-fallback extension diagnostics."""
+        reasons: list[GracefulExtDiagnostic] = []
+
+        def visit_expr(expr: Expr) -> None:
+            if expr.kind == "graceful_ext":
+                reasons.append(
+                    GracefulExtDiagnostic(
+                        target_name=script.target_name,
+                        trigger_kind=script.trigger.kind,
+                        trigger_value=script.trigger.value,
+                        node_kind="expression",
+                        opcode=str(expr.value),
+                    )
+                )
+            for arg in expr.args:
+                visit_expr(arg)
+            if isinstance(expr.value, dict):
+                for item in expr.value.values():
+                    if isinstance(item, Expr):
+                        visit_expr(item)
+
+        def visit_stmt(stmt: Stmt) -> None:
+            if stmt.kind == "graceful_ext":
+                reasons.append(
+                    GracefulExtDiagnostic(
+                        target_name=script.target_name,
+                        trigger_kind=script.trigger.kind,
+                        trigger_value=script.trigger.value,
+                        node_kind="statement",
+                        opcode=str(stmt.args.get("opcode", "")),
+                        block_id=stmt.args.get("block_id"),
+                    )
+                )
+            for value in stmt.args.values():
+                if isinstance(value, Expr):
+                    visit_expr(value)
+                elif isinstance(value, list):
+                    for item in value:
+                        if isinstance(item, Stmt):
+                            visit_stmt(item)
+                        elif isinstance(item, Expr):
+                            visit_expr(item)
+                elif isinstance(value, dict):
+                    for item in value.values():
+                        if isinstance(item, Expr):
+                            visit_expr(item)
+
+        for stmt in script.body:
+            visit_stmt(stmt)
+        unique: dict[tuple[str, str, str | None], GracefulExtDiagnostic] = {}
         for item in reasons:
             unique[(item.node_kind, item.opcode, item.block_id)] = item
         return [unique[key] for key in sorted(unique)]

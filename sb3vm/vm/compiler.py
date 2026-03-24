@@ -259,6 +259,11 @@ def compile_stmt(stmt: IrStmt) -> StmtFn:
             yield "yield"
 
         return run
+    if kind == "graceful_ext":
+        def run(vm: Any, thread: Any) -> CompiledRunner:
+            yield "yield"
+
+        return run
     if kind == "music_play_drum":
         beats_fn = compile_expr(stmt.get("beats"))
 
@@ -432,5 +437,7 @@ def compile_expr(expr: IrExpr) -> ExprFn:
             return vm._apply_mathop(op, to_number(arg_fns[0](vm, thread)))
 
         return run
+    if kind == "graceful_ext":
+        return lambda vm, thread: ""
     raise ValueError(f"Unsupported compiled expression: {kind}")
 

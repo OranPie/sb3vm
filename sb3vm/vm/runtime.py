@@ -251,6 +251,16 @@ class Sb3Vm:
             for diagnostic in script.unsupported_details
         ]
         unsupported.extend(diagnostic.to_dict() for diagnostic in self.parsed.diagnostics)
+        graceful = [
+            {
+                "target": script.target_name,
+                "trigger": script.trigger.kind,
+                "value": script.trigger.value,
+                "opcodes": [d.opcode for d in script.graceful_ext_details],
+            }
+            for script in self.scripts
+            if script.graceful_ext_details
+        ]
         return {
             "targets": [t.name for t in self.project.targets],
             "script_count": len(self.scripts),
@@ -268,6 +278,7 @@ class Sb3Vm:
                 for key, ir_script in sorted(self.ir_scripts.items())
             },
             "unsupported_scripts": unsupported,
+            "graceful_ext_scripts": graceful,
         }
 
     def run_for(self, seconds: float, dt: float = 1 / 30) -> RunResult:
@@ -616,6 +627,8 @@ class Sb3Vm:
             self.state.reset_timer()
             return None
         if kind == "no_op":
+            return None
+        if kind == "graceful_ext":
             return None
         if kind == "wait_until":
             thread.frames.append(FrameState(kind="wait_until_loop", stmts=[], loop=LoopState(kind="wait_until", body=[], condition=stmt.args["condition"])))
