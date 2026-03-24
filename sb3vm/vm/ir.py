@@ -48,6 +48,21 @@ SAFE_EXPR_KINDS = {
     "operator_contains",
     "operator_round",
     "operator_mathop",
+    # Sensing (added in compatibility pass)
+    "sensing_of",
+    "distance_to",
+    "loudness",
+    "current_time",
+    "days_since_2000",
+    "username",
+    "touching_color",
+    "color_touching_color",
+    "volume",
+    # Extension expressions
+    "music_tempo",
+    "video_sensing",
+    "translate",
+    "viewer_language",
 }
 
 SAFE_STMT_KINDS = {
@@ -59,7 +74,13 @@ SAFE_STMT_KINDS = {
     "list_insert",
     "list_replace",
     "wait",
+    "no_op",
     "music_play_note",
+    "music_play_drum",
+    "music_rest",
+    "music_set_instrument",
+    "music_set_tempo",
+    "music_change_tempo",
     "repeat",
     "forever",
     "if",

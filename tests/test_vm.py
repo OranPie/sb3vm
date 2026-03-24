@@ -254,14 +254,14 @@ def test_inspect_reports_structured_unsupported_diagnostics(tmp_path):
     vm = Sb3Vm(load_sb3(path))
     inspect = vm.inspect()
 
-    assert inspect["opcode_coverage"]["unsupported_by_opcode"] == {"pen_penDown": 1}
+    assert inspect["opcode_coverage"]["unsupported_by_opcode"] == {"gdxfor_getAcceleration": 1}
     assert inspect["unsupported_scripts"] == [
         {
             "target": "Stage",
             "trigger": "green_flag",
             "value": None,
             "node_kind": "statement",
-            "opcode": "pen_penDown",
+            "opcode": "gdxfor_getAcceleration",
             "reason": "unsupported statement opcode",
             "block_id": "move",
         }
@@ -366,8 +366,8 @@ def test_cli_inspect_emits_opcode_coverage_json(tmp_path):
 
     payload = json.loads(proc.stdout)
     assert proc.returncode == 0
-    assert payload["opcode_coverage"]["by_opcode"]["pen_penDown"] == 1
-    assert payload["unsupported_scripts"][0]["opcode"] == "pen_penDown"
+    assert payload["opcode_coverage"]["by_opcode"]["gdxfor_getAcceleration"] == 1
+    assert payload["unsupported_scripts"][0]["opcode"] == "gdxfor_getAcceleration"
 
 
 def test_custom_procedure_arguments_and_nested_calls(tmp_path):
@@ -2404,4 +2404,426 @@ def test_motion_goto_with_menu_not_unsupported(tmp_path):
     vm = Sb3Vm(load_sb3(path))
     vm.run_for(0.1)
 
+    assert vm.inspect()["unsupported_scripts"] == []
+
+
+# ---------------------------------------------------------------------------
+# Extension system tests
+# ---------------------------------------------------------------------------
+
+def test_pen_opcodes_are_no_ops_and_not_unsupported(tmp_path):
+    """Pen drawing blocks run without error and don't mark scripts unsupported."""
+    stage_blocks = {
+        "hat": {"opcode": "event_whenflagclicked", "next": "pen_down", "parent": None, "inputs": {}, "fields": {}, "topLevel": True},
+        "pen_down": {"opcode": "pen_penDown", "next": "pen_up", "parent": "hat", "inputs": {}, "fields": {}, "topLevel": False},
+        "pen_up": {"opcode": "pen_penUp", "next": "stamp", "parent": "pen_down", "inputs": {}, "fields": {}, "topLevel": False},
+        "stamp": {"opcode": "pen_stamp", "next": "clear", "parent": "pen_up", "inputs": {}, "fields": {}, "topLevel": False},
+        "clear": {"opcode": "pen_clear", "next": "done", "parent": "stamp", "inputs": {}, "fields": {}, "topLevel": False},
+        "done": {
+            "opcode": "data_setvariableto",
+            "next": None,
+            "parent": "clear",
+            "inputs": {"VALUE": [1, [4, "1"]]},
+            "fields": {"VARIABLE": ["done", "v2"]},
+            "topLevel": False,
+        },
+    }
+    path = tmp_path / "pen_noop.sb3"
+    write_sb3(path, _base_project(blocks_stage=stage_blocks))
+
+    vm = Sb3Vm(load_sb3(path))
+    vm.run_for(0.3)
+
+    assert vm.state.stage_variables["done"] == 1
+    assert vm.inspect()["unsupported_scripts"] == []
+
+
+def test_music_play_drum_waits_for_beats(tmp_path):
+    """music_playDrumForBeats blocks execution until the beat duration elapses."""
+    stage_blocks = {
+        "hat": {"opcode": "event_whenflagclicked", "next": "drum", "parent": None, "inputs": {}, "fields": {}, "topLevel": True},
+        "drum": {
+            "opcode": "music_playDrumForBeats",
+            "next": "done",
+            "parent": "hat",
+            "inputs": {
+                "DRUM": [1, "drum_menu"],
+                "BEATS": [1, [4, "0.5"]],
+            },
+            "fields": {},
+            "topLevel": False,
+        },
+        "drum_menu": {
+            "opcode": "music_menu_DRUM",
+            "next": None,
+            "parent": "drum",
+            "inputs": {},
+            "fields": {"DRUM": ["1", None]},
+            "topLevel": False,
+        },
+        "done": {
+            "opcode": "data_setvariableto",
+            "next": None,
+            "parent": "drum",
+            "inputs": {"VALUE": [1, [4, "1"]]},
+            "fields": {"VARIABLE": ["done", "v2"]},
+            "topLevel": False,
+        },
+    }
+    project = _base_project(blocks_stage=stage_blocks)
+    project["targets"][0]["tempo"] = 60  # 1 beat = 1 second; 0.5 beats = 0.5 s
+    path = tmp_path / "drum_wait.sb3"
+    write_sb3(path, project)
+
+    vm = Sb3Vm(load_sb3(path))
+    vm.start_green_flag()
+    vm.step(1 / 30)
+    assert vm.state.stage_variables["done"] == 0  # still waiting
+
+    for _ in range(20):
+        vm.step(1 / 30)
+    assert vm.state.stage_variables["done"] == 1
+
+
+def test_music_rest_waits_for_beats(tmp_path):
+    """music_restForBeats delays execution by the given beat count."""
+    stage_blocks = {
+        "hat": {"opcode": "event_whenflagclicked", "next": "rest", "parent": None, "inputs": {}, "fields": {}, "topLevel": True},
+        "rest": {
+            "opcode": "music_restForBeats",
+            "next": "done",
+            "parent": "hat",
+            "inputs": {"BEATS": [1, [4, "1"]]},
+            "fields": {},
+            "topLevel": False,
+        },
+        "done": {
+            "opcode": "data_setvariableto",
+            "next": None,
+            "parent": "rest",
+            "inputs": {"VALUE": [1, [4, "1"]]},
+            "fields": {"VARIABLE": ["done", "v2"]},
+            "topLevel": False,
+        },
+    }
+    project = _base_project(blocks_stage=stage_blocks)
+    project["targets"][0]["tempo"] = 120  # 1 beat = 0.5 s
+    path = tmp_path / "rest_wait.sb3"
+    write_sb3(path, project)
+
+    vm = Sb3Vm(load_sb3(path))
+    vm.start_green_flag()
+    vm.step(1 / 30)
+    assert vm.state.stage_variables["done"] == 0  # still waiting
+
+    for _ in range(25):
+        vm.step(1 / 30)
+    assert vm.state.stage_variables["done"] == 1
+
+
+def test_music_set_and_get_tempo(tmp_path):
+    """music_setTempo updates vm.state.music_tempo; music_getTempo reads it back."""
+    stage_blocks = {
+        "hat": {"opcode": "event_whenflagclicked", "next": "set_tempo", "parent": None, "inputs": {}, "fields": {}, "topLevel": True},
+        "set_tempo": {
+            "opcode": "music_setTempo",
+            "next": "store",
+            "parent": "hat",
+            "inputs": {"TEMPO": [1, [4, "180"]]},
+            "fields": {},
+            "topLevel": False,
+        },
+        "store": {
+            "opcode": "data_setvariableto",
+            "next": None,
+            "parent": "set_tempo",
+            "inputs": {"VALUE": [1, "tempo_expr"]},
+            "fields": {"VARIABLE": ["score", "v1"]},
+            "topLevel": False,
+        },
+        "tempo_expr": {
+            "opcode": "music_getTempo",
+            "next": None,
+            "parent": "store",
+            "inputs": {},
+            "fields": {},
+            "topLevel": False,
+        },
+    }
+    path = tmp_path / "set_tempo.sb3"
+    write_sb3(path, _base_project(blocks_stage=stage_blocks))
+
+    vm = Sb3Vm(load_sb3(path))
+    vm.run_for(0.1)
+
+    assert vm.state.music_tempo == 180.0
+    assert vm.state.stage_variables["score"] == 180.0
+    assert vm.inspect()["unsupported_scripts"] == []
+
+
+def test_music_change_tempo(tmp_path):
+    """music_changeTempo adjusts music_tempo by a delta."""
+    stage_blocks = {
+        "hat": {"opcode": "event_whenflagclicked", "next": "change", "parent": None, "inputs": {}, "fields": {}, "topLevel": True},
+        "change": {
+            "opcode": "music_changeTempo",
+            "next": "store",
+            "parent": "hat",
+            "inputs": {"TEMPO": [1, [4, "20"]]},
+            "fields": {},
+            "topLevel": False,
+        },
+        "store": {
+            "opcode": "data_setvariableto",
+            "next": None,
+            "parent": "change",
+            "inputs": {"VALUE": [1, "tempo_expr"]},
+            "fields": {"VARIABLE": ["score", "v1"]},
+            "topLevel": False,
+        },
+        "tempo_expr": {
+            "opcode": "music_getTempo",
+            "next": None,
+            "parent": "store",
+            "inputs": {},
+            "fields": {},
+            "topLevel": False,
+        },
+    }
+    project = _base_project(blocks_stage=stage_blocks)
+    project["targets"][0]["tempo"] = 100
+    path = tmp_path / "change_tempo.sb3"
+    write_sb3(path, project)
+
+    vm = Sb3Vm(load_sb3(path))
+    vm.run_for(0.1)
+
+    assert vm.state.music_tempo == 120.0
+    assert vm.state.stage_variables["score"] == 120.0
+
+
+def test_music_set_instrument_is_no_op(tmp_path):
+    """music_setInstrument does not error and does not block execution."""
+    stage_blocks = {
+        "hat": {"opcode": "event_whenflagclicked", "next": "set_inst", "parent": None, "inputs": {}, "fields": {}, "topLevel": True},
+        "set_inst": {
+            "opcode": "music_setInstrument",
+            "next": "done",
+            "parent": "hat",
+            "inputs": {"INSTRUMENT": [1, "inst_menu"]},
+            "fields": {},
+            "topLevel": False,
+        },
+        "inst_menu": {
+            "opcode": "music_menu_INSTRUMENT",
+            "next": None,
+            "parent": "set_inst",
+            "inputs": {},
+            "fields": {"INSTRUMENT": ["1", None]},
+            "topLevel": False,
+        },
+        "done": {
+            "opcode": "data_setvariableto",
+            "next": None,
+            "parent": "set_inst",
+            "inputs": {"VALUE": [1, [4, "1"]]},
+            "fields": {"VARIABLE": ["done", "v2"]},
+            "topLevel": False,
+        },
+    }
+    path = tmp_path / "set_instrument.sb3"
+    write_sb3(path, _base_project(blocks_stage=stage_blocks))
+
+    vm = Sb3Vm(load_sb3(path))
+    vm.run_for(0.1)
+
+    assert vm.state.stage_variables["done"] == 1
+    assert vm.inspect()["unsupported_scripts"] == []
+
+
+def test_video_sensing_returns_zero(tmp_path):
+    """videoSensing_videoOn evaluates to 0 (no camera) in headless mode."""
+    stage_blocks = {
+        "hat": {"opcode": "event_whenflagclicked", "next": "store", "parent": None, "inputs": {}, "fields": {}, "topLevel": True},
+        "store": {
+            "opcode": "data_setvariableto",
+            "next": None,
+            "parent": "hat",
+            "inputs": {"VALUE": [1, "video_expr"]},
+            "fields": {"VARIABLE": ["score", "v1"]},
+            "topLevel": False,
+        },
+        "video_expr": {
+            "opcode": "videoSensing_videoOn",
+            "next": None,
+            "parent": "store",
+            "inputs": {
+                "ATTRIBUTE": [1, "attr_menu"],
+                "SUBJECT": [1, "subj_menu"],
+            },
+            "fields": {},
+            "topLevel": False,
+        },
+        "attr_menu": {
+            "opcode": "videoSensing_menu_ATTRIBUTE",
+            "next": None,
+            "parent": "video_expr",
+            "inputs": {},
+            "fields": {"ATTRIBUTE": ["motion", None]},
+            "topLevel": False,
+        },
+        "subj_menu": {
+            "opcode": "videoSensing_menu_SUBJECT",
+            "next": None,
+            "parent": "video_expr",
+            "inputs": {},
+            "fields": {"SUBJECT": ["this sprite", None]},
+            "topLevel": False,
+        },
+    }
+    path = tmp_path / "video_sensing.sb3"
+    write_sb3(path, _base_project(blocks_stage=stage_blocks))
+
+    vm = Sb3Vm(load_sb3(path))
+    vm.run_for(0.1)
+
+    assert vm.state.stage_variables["score"] == 0
+    assert vm.inspect()["unsupported_scripts"] == []
+
+
+def test_text2speech_is_no_op(tmp_path):
+    """text2speech_speakAndWait runs without error and completes the script."""
+    stage_blocks = {
+        "hat": {"opcode": "event_whenflagclicked", "next": "speak", "parent": None, "inputs": {}, "fields": {}, "topLevel": True},
+        "speak": {
+            "opcode": "text2speech_speakAndWait",
+            "next": "done",
+            "parent": "hat",
+            "inputs": {"WORDS": [1, [10, "Hello"]]},
+            "fields": {},
+            "topLevel": False,
+        },
+        "done": {
+            "opcode": "data_setvariableto",
+            "next": None,
+            "parent": "speak",
+            "inputs": {"VALUE": [1, [4, "1"]]},
+            "fields": {"VARIABLE": ["done", "v2"]},
+            "topLevel": False,
+        },
+    }
+    path = tmp_path / "tts.sb3"
+    write_sb3(path, _base_project(blocks_stage=stage_blocks))
+
+    vm = Sb3Vm(load_sb3(path))
+    vm.run_for(0.1)
+
+    assert vm.state.stage_variables["done"] == 1
+    assert vm.inspect()["unsupported_scripts"] == []
+
+
+def test_translate_passthrough(tmp_path):
+    """translate_getTranslate returns the original text unchanged in headless mode."""
+    stage_blocks = {
+        "hat": {"opcode": "event_whenflagclicked", "next": "store", "parent": None, "inputs": {}, "fields": {}, "topLevel": True},
+        "store": {
+            "opcode": "data_setvariableto",
+            "next": None,
+            "parent": "hat",
+            "inputs": {"VALUE": [1, "translate_expr"]},
+            "fields": {"VARIABLE": ["score", "v1"]},
+            "topLevel": False,
+        },
+        "translate_expr": {
+            "opcode": "translate_getTranslate",
+            "next": None,
+            "parent": "store",
+            "inputs": {
+                "WORDS": [1, [10, "hello world"]],
+                "LANGUAGE": [1, "lang_menu"],
+            },
+            "fields": {},
+            "topLevel": False,
+        },
+        "lang_menu": {
+            "opcode": "translate_menu_languages",
+            "next": None,
+            "parent": "translate_expr",
+            "inputs": {},
+            "fields": {"languages": ["fr", None]},
+            "topLevel": False,
+        },
+    }
+    path = tmp_path / "translate.sb3"
+    write_sb3(path, _base_project(blocks_stage=stage_blocks))
+
+    vm = Sb3Vm(load_sb3(path))
+    vm.run_for(0.1)
+
+    assert vm.state.stage_variables["score"] == "hello world"
+    assert vm.inspect()["unsupported_scripts"] == []
+
+
+def test_translate_viewer_language(tmp_path):
+    """translate_getViewerLanguage returns 'en' in headless mode."""
+    stage_blocks = {
+        "hat": {"opcode": "event_whenflagclicked", "next": "store", "parent": None, "inputs": {}, "fields": {}, "topLevel": True},
+        "store": {
+            "opcode": "data_setvariableto",
+            "next": None,
+            "parent": "hat",
+            "inputs": {"VALUE": [1, "lang_expr"]},
+            "fields": {"VARIABLE": ["score", "v1"]},
+            "topLevel": False,
+        },
+        "lang_expr": {
+            "opcode": "translate_getViewerLanguage",
+            "next": None,
+            "parent": "store",
+            "inputs": {},
+            "fields": {},
+            "topLevel": False,
+        },
+    }
+    path = tmp_path / "viewer_lang.sb3"
+    write_sb3(path, _base_project(blocks_stage=stage_blocks))
+
+    vm = Sb3Vm(load_sb3(path))
+    vm.run_for(0.1)
+
+    assert vm.state.stage_variables["score"] == "en"
+    assert vm.inspect()["unsupported_scripts"] == []
+
+
+def test_extension_stmts_compile_and_run(tmp_path):
+    """Extension stmts (pen, music) are accepted by the JIT compiler."""
+    stage_blocks = {
+        "hat": {"opcode": "event_whenflagclicked", "next": "pen_down", "parent": None, "inputs": {}, "fields": {}, "topLevel": True},
+        "pen_down": {"opcode": "pen_penDown", "next": "pen_up", "parent": "hat", "inputs": {}, "fields": {}, "topLevel": False},
+        "pen_up": {"opcode": "pen_penUp", "next": "set_tempo", "parent": "pen_down", "inputs": {}, "fields": {}, "topLevel": False},
+        "set_tempo": {
+            "opcode": "music_setTempo",
+            "next": "done",
+            "parent": "pen_up",
+            "inputs": {"TEMPO": [1, [4, "200"]]},
+            "fields": {},
+            "topLevel": False,
+        },
+        "done": {
+            "opcode": "data_setvariableto",
+            "next": None,
+            "parent": "set_tempo",
+            "inputs": {"VALUE": [1, [4, "1"]]},
+            "fields": {"VARIABLE": ["done", "v2"]},
+            "topLevel": False,
+        },
+    }
+    path = tmp_path / "ext_compiled.sb3"
+    write_sb3(path, _base_project(blocks_stage=stage_blocks))
+
+    vm = Sb3Vm(load_sb3(path), enable_compilation=True, lazy_compile_threshold=1)
+    vm.run_for(0.2)
+
+    assert vm.state.stage_variables["done"] == 1
+    assert vm.state.music_tempo == 200.0
     assert vm.inspect()["unsupported_scripts"] == []

@@ -96,6 +96,7 @@ class VMState:
     threads: dict[int, ThreadState] = field(default_factory=dict)
     unsupported_scripts: list[UnsupportedDiagnostic] = field(default_factory=list)
     runtime_diagnostics: list[RuntimeDiagnostic] = field(default_factory=list)
+    music_tempo: float = 60.0
 
     @classmethod
     def from_project(cls, project: Project) -> "VMState":
@@ -124,6 +125,12 @@ class VMState:
             if target.is_stage:
                 state.stage_variables = tstate.local_variables
                 state.stage_lists = tstate.local_lists
+                try:
+                    tempo = float(target.tempo)
+                    if tempo > 0:
+                        state.music_tempo = tempo
+                except (TypeError, ValueError):
+                    pass
             next_instance_id += 1
         return state
 

@@ -178,7 +178,8 @@ def eval_expr(expr: Expr, vm_state: VMState, thread: ThreadState, vm: Any) -> An
             return math.exp(value)
         if op == "10 ^":
             return 10 ** value
-    raise ValueError(f"Unsupported expression kind: {kind}")
+    from sb3vm.vm.extensions import eval_ext_expr
+    return eval_ext_expr(kind, expr, vm_state, thread, vm)
 
 
 def _eval_current_time(component: str) -> int:

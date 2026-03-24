@@ -4,7 +4,10 @@
       "isStage": true,
       "name": "Stage",
       "variables": {
-        "v1": ["score", 0]
+        "v1": [
+          "score",
+          0
+        ]
       },
       "lists": {},
       "broadcasts": {
@@ -20,7 +23,7 @@
           "topLevel": true
         },
         "move": {
-          "opcode": "pen_penDown",
+          "opcode": "gdxfor_getAcceleration",
           "next": null,
           "parent": "hat",
           "inputs": {},

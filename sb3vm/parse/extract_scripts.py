@@ -9,6 +9,7 @@ from sb3vm.log import debug, get_logger, info, warn
 from sb3vm.model.project import Project, Target
 from sb3vm.parse.ast_nodes import Expr, ProcedureDefinition, Script, Stmt, Trigger, UnsupportedDiagnostic
 from sb3vm.vm.errors import ProjectValidationError
+from sb3vm.vm.extensions import EXT_EVENT_OPS, EXT_EXPR_OPS, EXT_STMT_OPS, parse_ext_expr, parse_ext_stmt
 
 
 _LOGGER = get_logger(__name__)
@@ -21,6 +22,7 @@ SUPPORTED_EVENT_OPS = {
     "event_whenthisspriteclicked",
     "control_start_as_clone",
     "event_whengreaterthan",
+    *EXT_EVENT_OPS,
 }
 
 ARG_REPORTER_OPS = {
@@ -86,6 +88,7 @@ SUPPORTED_EXPR_OPS = {
     "data_contentsoflist",
     *ARG_REPORTER_OPS,
     "control_create_clone_of_menu",
+    *EXT_EXPR_OPS,
 }
 
 SUPPORTED_STMT_OPS = {
@@ -159,6 +162,7 @@ SUPPORTED_STMT_OPS = {
     "data_showlist",
     "data_hidelist",
     "music_playNoteForBeats",
+    *EXT_STMT_OPS,
 }
 
 
@@ -543,6 +547,9 @@ class ProjectParser:
             return Stmt("no_op", {})
         if opcode == "music_playNoteForBeats":
             return Stmt("music_play_note", {"note": expr("NOTE"), "beats": expr("BEATS")})
+        ext = parse_ext_stmt(opcode, block, expr, f)
+        if ext is not None:
+            return ext
         return Stmt("unsupported", {"opcode": opcode, "block_id": block_id})
 
     def parse_procedure_call(
@@ -781,6 +788,9 @@ class ProjectParser:
             if arg_name and procedure_args and arg_name in procedure_args:
                 return Expr("proc_arg", procedure_args[arg_name])
             return Expr("unsupported", opcode)
+        ext = parse_ext_expr(opcode, block, lambda key: self.parse_input_expr(target, block_id, block, key, procedure_args=procedure_args), self.field_value)
+        if ext is not None:
+            return ext
         return Expr("unsupported", opcode)
 
     def parse_clone_selector(

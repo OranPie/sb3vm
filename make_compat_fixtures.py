@@ -45,7 +45,7 @@ partial_project = {
                 "hat1": {"opcode": "event_whenflagclicked", "next": "set", "parent": None, "inputs": {}, "fields": {}, "topLevel": True},
                 "set": {"opcode": "data_setvariableto", "next": None, "parent": "hat1", "inputs": {"VALUE": [1, [4, "1"]]}, "fields": {"VARIABLE": ["score", "v1"]}, "topLevel": False},
                 "hat2": {"opcode": "event_whenflagclicked", "next": "move", "parent": None, "inputs": {}, "fields": {}, "topLevel": True},
-                "move": {"opcode": "pen_penDown", "next": None, "parent": "hat2", "inputs": {}, "fields": {}, "topLevel": False},
+                "move": {"opcode": "gdxfor_getAcceleration", "next": None, "parent": "hat2", "inputs": {}, "fields": {}, "topLevel": False},
             },
             "comments": {},
             "costumes": [{"name": "backdrop1"}],

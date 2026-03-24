@@ -623,7 +623,8 @@ class Sb3Vm:
         if kind == "unsupported":
             thread.done = True
             return "block"
-        raise ValueError(f"Unsupported statement kind: {kind}")
+        from sb3vm.vm.extensions import exec_ext_stmt
+        return exec_ext_stmt(kind, stmt, thread, self)
 
     def _handle_stop(self, thread: ThreadState, mode: str) -> str:
         if mode == "all":
@@ -856,11 +857,7 @@ class Sb3Vm:
         return value
 
     def _stage_tempo(self) -> float:
-        try:
-            tempo = float(self.project.get_target("Stage").tempo)
-        except (KeyError, TypeError, ValueError):
-            return 60.0
-        return tempo if tempo > 0 else 60.0
+        return self.state.music_tempo
 
     def _beats_to_seconds(self, beats: Any) -> float:
         return max(0.0, to_number(beats)) * 60.0 / self._stage_tempo()

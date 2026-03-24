@@ -254,6 +254,50 @@ def compile_stmt(stmt: IrStmt) -> StmtFn:
             yield "yield"
 
         return run
+    if kind == "no_op":
+        def run(vm: Any, thread: Any) -> CompiledRunner:
+            yield "yield"
+
+        return run
+    if kind == "music_play_drum":
+        beats_fn = compile_expr(stmt.get("beats"))
+
+        def run(vm: Any, thread: Any) -> CompiledRunner:
+            thread.wake_time = vm.state.time_seconds + vm._beats_to_seconds(beats_fn(vm, thread))
+            yield "block"
+
+        return run
+    if kind == "music_rest":
+        beats_fn = compile_expr(stmt.get("beats"))
+
+        def run(vm: Any, thread: Any) -> CompiledRunner:
+            thread.wake_time = vm.state.time_seconds + vm._beats_to_seconds(beats_fn(vm, thread))
+            yield "block"
+
+        return run
+    if kind == "music_set_instrument":
+        def run(vm: Any, thread: Any) -> CompiledRunner:
+            yield "yield"
+
+        return run
+    if kind == "music_set_tempo":
+        tempo_fn = compile_expr(stmt.get("tempo"))
+
+        def run(vm: Any, thread: Any) -> CompiledRunner:
+            val = to_number(tempo_fn(vm, thread))
+            vm.state.music_tempo = max(20.0, min(500.0, float(val)))
+            yield "yield"
+
+        return run
+    if kind == "music_change_tempo":
+        delta_fn = compile_expr(stmt.get("delta"))
+
+        def run(vm: Any, thread: Any) -> CompiledRunner:
+            delta = to_number(delta_fn(vm, thread))
+            vm.state.music_tempo = max(20.0, min(500.0, vm.state.music_tempo + float(delta)))
+            yield "yield"
+
+        return run
     raise ValueError(f"Unsupported compiled statement: {kind}")
 
 
