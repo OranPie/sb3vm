@@ -303,6 +303,15 @@ def compile_stmt(stmt: IrStmt) -> StmtFn:
             yield "yield"
 
         return run
+    # Pen statements: delegate to interpreter-mode exec_ext_stmt at runtime
+    if kind.startswith("pen_"):
+        from sb3vm.vm.extensions import exec_pen_stmt
+
+        def run(vm: Any, thread: Any) -> CompiledRunner:
+            exec_pen_stmt(kind, stmt, thread, vm)
+            yield "yield"
+
+        return run
     raise ValueError(f"Unsupported compiled statement: {kind}")
 
 

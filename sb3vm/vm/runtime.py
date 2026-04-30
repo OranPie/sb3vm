@@ -96,6 +96,12 @@ class Sb3Vm:
         self._last_pressed_keys: set[str] = set()
         self._pending_instance_deletions: set[int] = set()
         self._costume_size_cache: dict[tuple[str, int], tuple[float, float]] = {}
+        # --- Render / pen hooks (injected by MinimalRenderer) ---
+        self.pen_draw_hook: Any = None   # (iid, ox, oy, nx, ny, color, size) -> None
+        self.pen_clear_hook: Any = None  # () -> None
+        self.pen_stamp_hook: Any = None  # (iid) -> None
+        self.compositor: Any = None      # Compositor | None
+        # ---------------------------------------------------------
         self._index_scripts()
         info(
             _LOGGER,
@@ -406,6 +412,8 @@ class Sb3Vm:
 
     def step(self, dt: float) -> None:
         trace(_LOGGER, "vm.Sb3Vm.step", "step begin dt=%.5f time=%.5f threads=%d", dt, self.state.time_seconds, len(self.state.threads))
+        if self.compositor is not None:
+            self.compositor.invalidate()
         self.state.time_seconds += dt
         self._poll_input_events()
         self._poll_greater_than_triggers()
@@ -1002,6 +1010,8 @@ class Sb3Vm:
 
     def _execute_move_state(self, thread: ThreadState, mode: str, values: dict[str, Any]) -> str | None:
         instance = self.state.get_instance(thread.instance_id)
+        _pen_active = instance.pen_down and self.pen_draw_hook is not None
+        _old_x, _old_y = instance.x, instance.y
         if mode == "goto_xy":
             instance.x = to_number(values["x"])
             instance.y = to_number(values["y"])
@@ -1041,6 +1051,13 @@ class Sb3Vm:
             instance.y += steps * math.sin(angle)
         elif mode == "if_edge_bounce":
             self._apply_if_edge_bounce(instance)
+        if _pen_active and (instance.x != _old_x or instance.y != _old_y):
+            self.pen_draw_hook(
+                thread.instance_id,
+                _old_x, _old_y,
+                instance.x, instance.y,
+                instance.pen_color, instance.pen_size,
+            )
         return None
 
     def _execute_looks_state(self, thread: ThreadState, mode: str, values: dict[str, Any]) -> str | None:

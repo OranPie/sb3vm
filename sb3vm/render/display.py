@@ -7,6 +7,10 @@ from typing import Any
 from sb3vm.log import debug, get_logger, info, trace
 from sb3vm.model.project import Project
 from sb3vm.render.assets import RenderAssetStore, RendererDependencyError, RendererError
+from sb3vm.render.compositor import Compositor
+from sb3vm.render.effects import apply_graphic_effects
+from sb3vm.render.pen import PenLayer
+from sb3vm.render.speech import paint_speech_bubble
 from sb3vm.vm.input_provider import HeadlessInputProvider, InteractiveInputProvider
 from sb3vm.vm.runtime import Sb3Vm
 
@@ -66,6 +70,17 @@ class MinimalRenderer:
         self._prompt_button = None
         self._prompt_visible = False
         self.input_provider = self._ensure_interactive_input_provider()
+        # Pen layer
+        cw = self.mapper.canvas_width
+        ch = self.mapper.canvas_height
+        self._pen_layer = PenLayer(cw, ch)
+        # Inject pen hooks into VM
+        self.vm.pen_clear_hook = self._pen_clear
+        self.vm.pen_stamp_hook = self._pen_stamp
+        self.vm.pen_draw_hook = self._pen_draw
+        # Headless compositor for colour-collision detection
+        compositor = Compositor(self.asset_store, scale=self.scale)
+        self.vm.compositor = compositor
 
     def run(self, *, seconds: float | None = None, dt: float = 1 / 30) -> None:
         try:
@@ -168,11 +183,31 @@ class MinimalRenderer:
         self._canvas.delete("all")
         self._image_refs.clear()
         self._paint_stage(snapshot["stage"])
+        self._paint_pen_layer()
         for drawable in snapshot["drawables"]:
             self._paint_drawable(drawable)
+        self._paint_speech_bubbles(snapshot["drawables"])
         if self.show_monitors:
             self._paint_monitors()
         self._sync_prompt(snapshot)
+
+    def _paint_pen_layer(self) -> None:
+        assert self._canvas is not None
+        pen_image = self._pen_layer.get_image()
+        if pen_image is None:
+            return
+        tk_image = self._image_tk.PhotoImage(pen_image)
+        self._image_refs.append(tk_image)
+        self._canvas.create_image(0, 0, image=tk_image, anchor="nw")
+
+    def _paint_speech_bubbles(self, drawables: list[dict[str, Any]]) -> None:
+        assert self._canvas is not None
+        for drawable in drawables:
+            if not drawable.get("visible", False):
+                continue
+            dialogue = drawable.get("dialogue")
+            if dialogue and dialogue.get("message"):
+                paint_speech_bubble(self._canvas, drawable, self.mapper)
 
     def _paint_stage(self, stage: dict[str, Any]) -> None:
         assert self._canvas is not None
@@ -186,12 +221,13 @@ class MinimalRenderer:
         assert self._canvas is not None
         if not drawable["visible"]:
             return
-        tk_image = self._drawable_tk_image(drawable)
+        tk_image, anchor_ox, anchor_oy = self._drawable_tk_image_with_offset(drawable)
         if tk_image is None:
             return
         self._image_refs.append(tk_image)
-        x, y = self.mapper.to_canvas(drawable["position"]["x"], drawable["position"]["y"])
-        self._canvas.create_image(x, y, image=tk_image, anchor="center")
+        cx, cy = self.mapper.to_canvas(drawable["position"]["x"], drawable["position"]["y"])
+        # Offset image center so rotation center lands on sprite's stage position
+        self._canvas.create_image(cx - anchor_ox, cy - anchor_oy, image=tk_image, anchor="center")
 
     def _stage_tk_image(self, stage: dict[str, Any]) -> Any | None:
         backdrop = stage.get("backdrop", {})
@@ -214,6 +250,20 @@ class MinimalRenderer:
         self._tk_image_cache[cache_key] = tk_image
         return tk_image
 
+    def _drawable_tk_image_with_offset(self, drawable: dict[str, Any]) -> tuple[Any, float, float]:
+        """Return (tk_image, offset_x, offset_y) or (None, 0, 0)."""
+        cache_key, rendered = self._drawable_rendered_image(drawable)
+        if cache_key is None or rendered is None:
+            return (None, 0.0, 0.0)
+        cached = self._tk_image_cache.get(cache_key)
+        if cached is None:
+            tk_image = self._image_tk.PhotoImage(rendered)
+            self._tk_image_cache[cache_key] = tk_image
+        else:
+            tk_image = cached
+        ox, oy = self._rotation_center_offset(rendered, drawable)
+        return (tk_image, ox, oy)
+
     def _drawable_tk_image(self, drawable: dict[str, Any]) -> Any | None:
         cache_key, rendered = self._drawable_rendered_image(drawable)
         if cache_key is None or rendered is None:
@@ -224,6 +274,34 @@ class MinimalRenderer:
         tk_image = self._image_tk.PhotoImage(rendered)
         self._tk_image_cache[cache_key] = tk_image
         return tk_image
+
+    def _rotation_center_offset(self, rendered_image: Any, drawable: dict[str, Any]) -> tuple[float, float]:
+        """Return (ox, oy) offset from rendered image center to rotation center."""
+        costume = drawable.get("costume", {})
+        rc_x = float(costume.get("rotationCenterX") or 0.0)
+        rc_y = float(costume.get("rotationCenterY") or 0.0)
+        image_ref = self.asset_store.load_image(costume)
+        if image_ref is not None:
+            native_w = float(image_ref.width)
+            native_h = float(image_ref.height)
+        else:
+            native_w = float(costume.get("native_width") or rendered_image.width)
+            native_h = float(costume.get("native_height") or rendered_image.height)
+        size_scale = max(0.0, drawable.get("size", 100.0) / 100.0) * self.scale
+        # Offset from center of scaled-but-unrotated image to the rotation pivot
+        ox = (rc_x - native_w / 2) * size_scale
+        oy = (rc_y - native_h / 2) * size_scale
+        rotation_style = str(drawable.get("rotation_style", "all around")).strip().lower()
+        direction = float(drawable.get("direction", 90.0))
+        if rotation_style == "don't rotate":
+            return (ox, oy)
+        if rotation_style == "left-right":
+            return (-ox if direction < 0 else ox, oy)
+        angle_deg = (90.0 - direction) % 360.0
+        if angle_deg == 0.0:
+            return (ox, oy)
+        a = math.radians(angle_deg)
+        return (ox * math.cos(a) - oy * math.sin(a), ox * math.sin(a) + oy * math.cos(a))
 
     def _drawable_rendered_image(self, drawable: dict[str, Any]) -> tuple[tuple[Any, ...] | None, Any | None]:
         costume = drawable.get("costume", {})
@@ -288,13 +366,41 @@ class MinimalRenderer:
             return self._apply_graphic_effects(rendered, drawable.get("effects", {}))
         return self._apply_graphic_effects(rendered.rotate(angle, expand=True), drawable.get("effects", {}))
 
-    def _effects_cache_key(self, effects: dict[str, Any]) -> tuple[tuple[str, float], ...]:
-        normalized: list[tuple[str, float]] = []
-        for name, raw in sorted(effects.items()):
-            value = self._effect_number(raw)
-            if value != 0.0:
-                normalized.append((str(name), round(value, 6)))
-        return tuple(normalized)
+    def _apply_graphic_effects(self, image: Any, effects: dict[str, Any]) -> Any:
+        return apply_graphic_effects(image, effects)
+
+    # ------------------------------------------------------------------
+    # Pen hook callbacks (injected into vm)
+    # ------------------------------------------------------------------
+
+    def _pen_clear(self) -> None:
+        self._pen_layer.clear()
+        self._rendered_image_cache.clear()
+        self._tk_image_cache.clear()
+
+    def _pen_stamp(self, instance_id: int) -> None:
+        snapshot = self._last_render_snapshot or self.vm.render_snapshot()
+        for drawable in snapshot.get("drawables", []):
+            if drawable.get("instance_id") == instance_id:
+                _, rendered = self._drawable_rendered_image(drawable)
+                if rendered is not None:
+                    cx, cy = self.mapper.to_canvas(
+                        drawable["position"]["x"], drawable["position"]["y"]
+                    )
+                    self._pen_layer.stamp_image(rendered, cx, cy)
+                break
+
+    def _pen_draw(
+        self,
+        instance_id: int,
+        from_x: float, from_y: float,
+        to_x: float, to_y: float,
+        pen_color: tuple[int, int, int, int],
+        pen_size: float,
+    ) -> None:
+        fx, fy = self.mapper.to_canvas(from_x, from_y)
+        tx, ty = self.mapper.to_canvas(to_x, to_y)
+        self._pen_layer.draw_line(fx, fy, tx, ty, pen_color, pen_size * self.scale)
 
     def _effect_number(self, value: Any) -> float:
         try:
@@ -302,131 +408,13 @@ class MinimalRenderer:
         except (TypeError, ValueError):
             return 0.0
 
-    def _apply_graphic_effects(self, image: Any, effects: dict[str, Any]) -> Any:
-        if not effects:
-            return image
-        rendered = image.convert("RGBA")
-        if self._effect_number(effects.get("color")):
-            rendered = self._apply_color_effect(rendered, self._effect_number(effects.get("color")))
-        if self._effect_number(effects.get("brightness")):
-            rendered = self._apply_brightness_effect(rendered, self._effect_number(effects.get("brightness")))
-        if self._effect_number(effects.get("pixelate")):
-            rendered = self._apply_pixelate_effect(rendered, self._effect_number(effects.get("pixelate")))
-        if self._effect_number(effects.get("mosaic")):
-            rendered = self._apply_mosaic_effect(rendered, self._effect_number(effects.get("mosaic")))
-        if self._effect_number(effects.get("whirl")):
-            rendered = self._apply_whirl_effect(rendered, self._effect_number(effects.get("whirl")))
-        if self._effect_number(effects.get("fisheye")):
-            rendered = self._apply_fisheye_effect(rendered, self._effect_number(effects.get("fisheye")))
-        if self._effect_number(effects.get("ghost")):
-            rendered = self._apply_ghost_effect(rendered, self._effect_number(effects.get("ghost")))
-        return rendered
-
-    def _apply_color_effect(self, image: Any, value: float) -> Any:
-        from PIL import Image
-
-        alpha = image.getchannel("A")
-        hsv = image.convert("RGB").convert("HSV")
-        channels = list(hsv.split())
-        hue_shift = int(round((value / 200.0) * 255.0)) % 256
-        channels[0] = channels[0].point(lambda pixel: (pixel + hue_shift) % 256)
-        colored = Image.merge("HSV", channels).convert("RGBA")
-        colored.putalpha(alpha)
-        return colored
-
-    def _apply_brightness_effect(self, image: Any, value: float) -> Any:
-        from PIL import Image
-
-        red, green, blue, alpha = image.split()
-        if value >= 0:
-            factor = min(value, 100.0) / 100.0
-
-            def brighten(pixel: int) -> int:
-                return max(0, min(255, int(round(pixel + (255 - pixel) * factor))))
-
-            return Image.merge("RGBA", (red.point(brighten), green.point(brighten), blue.point(brighten), alpha))
-
-        factor = max(0.0, 1.0 + max(value, -100.0) / 100.0)
-
-        def darken(pixel: int) -> int:
-            return max(0, min(255, int(round(pixel * factor))))
-
-        return Image.merge("RGBA", (red.point(darken), green.point(darken), blue.point(darken), alpha))
-
-    def _apply_ghost_effect(self, image: Any, value: float) -> Any:
-        from PIL import Image
-
-        ghost_factor = max(0.0, 1.0 - min(max(value, 0.0), 100.0) / 100.0)
-        red, green, blue, alpha = image.split()
-        alpha = alpha.point(lambda pixel: max(0, min(255, int(round(pixel * ghost_factor)))))
-        return Image.merge("RGBA", (red, green, blue, alpha))
-
-    def _apply_pixelate_effect(self, image: Any, value: float) -> Any:
-        from PIL import Image
-
-        block = max(1, int(abs(value) / 10.0) + 1)
-        width = max(1, image.width // block)
-        height = max(1, image.height // block)
-        resampling = getattr(Image, "Resampling", Image)
-        return image.resize((width, height), resampling.BOX).resize((image.width, image.height), resampling.NEAREST)
-
-    def _apply_mosaic_effect(self, image: Any, value: float) -> Any:
-        from PIL import Image
-
-        cells = max(1, int(abs(value) / 10.0) + 1)
-        tile_width = max(1, image.width // cells)
-        tile_height = max(1, image.height // cells)
-        resampling = getattr(Image, "Resampling", Image)
-        tile = image.resize((tile_width, tile_height), resampling.BOX)
-        mosaic = Image.new("RGBA", image.size, (0, 0, 0, 0))
-        for x in range(0, image.width, tile_width):
-            for y in range(0, image.height, tile_height):
-                mosaic.alpha_composite(tile, (x, y))
-        return mosaic
-
-    def _apply_whirl_effect(self, image: Any, value: float) -> Any:
-        return self._warp_image(image, lambda dx, dy, radius: self._whirl_source_offset(dx, dy, radius, value))
-
-    def _apply_fisheye_effect(self, image: Any, value: float) -> Any:
-        return self._warp_image(image, lambda dx, dy, radius: self._fisheye_source_offset(dx, dy, radius, value))
-
-    def _warp_image(self, image: Any, mapper: Any) -> Any:
-        from PIL import Image
-
-        source = image.convert("RGBA")
-        warped = Image.new("RGBA", source.size, (0, 0, 0, 0))
-        src_pixels = source.load()
-        dst_pixels = warped.load()
-        center_x = (source.width - 1) / 2.0
-        center_y = (source.height - 1) / 2.0
-        max_radius = max(1.0, min(source.width, source.height) / 2.0)
-        for y in range(source.height):
-            for x in range(source.width):
-                dx = x - center_x
-                dy = y - center_y
-                radius = math.hypot(dx, dy) / max_radius
-                source_dx, source_dy = mapper(dx, dy, radius)
-                source_x = int(round(center_x + source_dx))
-                source_y = int(round(center_y + source_dy))
-                if 0 <= source_x < source.width and 0 <= source_y < source.height:
-                    dst_pixels[x, y] = src_pixels[source_x, source_y]
-        return warped
-
-    def _whirl_source_offset(self, dx: float, dy: float, radius: float, value: float) -> tuple[float, float]:
-        if radius >= 1.0:
-            return (dx, dy)
-        angle = math.radians(value) * (1.0 - radius) ** 2
-        cos_angle = math.cos(-angle)
-        sin_angle = math.sin(-angle)
-        return (dx * cos_angle - dy * sin_angle, dx * sin_angle + dy * cos_angle)
-
-    def _fisheye_source_offset(self, dx: float, dy: float, radius: float, value: float) -> tuple[float, float]:
-        if radius <= 0.0 or radius >= 1.0:
-            return (dx, dy)
-        power = max(0.2, 1.0 + value / 100.0)
-        source_radius = radius ** power
-        scale = source_radius / radius
-        return (dx * scale, dy * scale)
+    def _effects_cache_key(self, effects: dict[str, Any]) -> tuple[tuple[str, float], ...]:
+        normalized: list[tuple[str, float]] = []
+        for name, raw in sorted(effects.items()):
+            value = self._effect_number(raw)
+            if value != 0.0:
+                normalized.append((str(name), round(value, 6)))
+        return tuple(normalized)
 
     def _event_key_name(self, event: Any) -> str | None:
         keysym = str(getattr(event, "keysym", "") or getattr(event, "char", "")).strip()

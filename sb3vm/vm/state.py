@@ -30,6 +30,12 @@ class TargetState:
     local_lists: dict[str, list[Any]] = field(default_factory=dict)
     is_stage: bool = False
     is_clone: bool = False
+    # Pen state
+    pen_down: bool = False
+    pen_color: tuple[int, int, int, int] = field(default_factory=lambda: (0, 0, 0, 255))
+    pen_size: float = 1.0
+    pen_shade: int = 50
+    pen_hue: int = 120
 
 
 @dataclass
@@ -305,7 +311,7 @@ class VMState:
             }
         resolved_index = costume_index % count
         costume = costumes[resolved_index]
-        return {
+        ref: dict[str, Any] = {
             "target_name": target_name,
             "index": resolved_index,
             "count": count,
@@ -313,4 +319,11 @@ class VMState:
             "asset_id": costume.get("assetId"),
             "md5ext": costume.get("md5ext"),
         }
+        rc_x = costume.get("rotationCenterX")
+        rc_y = costume.get("rotationCenterY")
+        if rc_x is not None:
+            ref["rotationCenterX"] = rc_x
+        if rc_y is not None:
+            ref["rotationCenterY"] = rc_y
+        return ref
 
