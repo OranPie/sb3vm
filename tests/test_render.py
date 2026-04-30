@@ -159,7 +159,7 @@ def test_run_display_cli_wires_renderer_without_debug_snapshot(monkeypatch, tmp_
     path = tmp_path / "display.sb3"
     write_sb3(path, _render_project_json(), assets={"bg.png": _png_bytes((255, 0, 0, 255)), "sprite.png": _png_bytes((0, 255, 0, 255))})
     parser = build_parser()
-    args = parser.parse_args(["run-display", str(path), "--seconds", "0", "--fps", "12", "--scale", "1.5", "--monitors"])
+    args = parser.parse_args(["run-display", str(path), "--seconds", "0", "--fps", "12", "--scale", "1.5", "--monitors", "--backend", "tkinter"])
     seen: dict[str, object] = {}
 
     def fake_run(self: MinimalRenderer, *, seconds: float | None = None, dt: float = 1 / 30) -> None:
@@ -184,7 +184,7 @@ def test_run_display_cli_uses_interactive_input_provider(monkeypatch, tmp_path: 
     path = tmp_path / "display.sb3"
     write_sb3(path, _render_project_json(), assets={"bg.png": _png_bytes((255, 0, 0, 255)), "sprite.png": _png_bytes((0, 255, 0, 255))})
     parser = build_parser()
-    args = parser.parse_args(["run-display", str(path), "--seconds", "0"])
+    args = parser.parse_args(["run-display", str(path), "--seconds", "0", "--backend", "tkinter"])
     seen: dict[str, object] = {}
 
     def fake_run(self: MinimalRenderer, *, seconds: float | None = None, dt: float = 1 / 30) -> None:
@@ -671,3 +671,78 @@ def test_speech_bubble_paint_calls_canvas(tmp_path: Path) -> None:
     assert "rect" in canvas_calls or "poly" in canvas_calls
     assert "text" in canvas_calls
 
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# PygameRenderer (headless via SDL_VIDEODRIVER=dummy)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def test_pygame_renderer_runs_headless(tmp_path: Path) -> None:
+    """PygameRenderer with SDL_VIDEODRIVER=dummy should complete seconds=0 without error."""
+    import os
+    import pytest
+
+    pytest.importorskip("pygame")
+
+    os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+    os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
+
+    from tests.test_helpers import write_sb3
+    from sb3vm.io.load_sb3 import load_sb3
+    from sb3vm.render.pygame_display import PygameRenderer
+    from sb3vm.vm.runtime import Sb3Vm
+
+    sb3_path = tmp_path / "minimal.sb3"
+    write_sb3(sb3_path, _render_project_json(), assets={"bg.png": _png_bytes((255, 0, 0, 255)), "sprite.png": _png_bytes((0, 255, 0, 255))})
+    project = load_sb3(sb3_path)
+    vm = Sb3Vm(project)
+    renderer = PygameRenderer(project, vm, scale=1.0, fps=30)
+    renderer.run(seconds=0)  # Should open, paint once, and exit immediately
+
+
+def test_pygame_renderer_injects_pen_hooks(tmp_path: Path) -> None:
+    """PygameRenderer.__post_init__ must wire pen hooks and compositor into vm."""
+    import os
+    import pytest
+
+    pytest.importorskip("pygame")
+    os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+    os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
+
+    from tests.test_helpers import write_sb3
+    from sb3vm.io.load_sb3 import load_sb3
+    from sb3vm.render.pygame_display import PygameRenderer
+    from sb3vm.vm.runtime import Sb3Vm
+
+    sb3_path = tmp_path / "hooks.sb3"
+    write_sb3(sb3_path, _render_project_json(), assets={"bg.png": _png_bytes((255, 0, 0, 255)), "sprite.png": _png_bytes((0, 255, 0, 255))})
+    project = load_sb3(sb3_path)
+    vm = Sb3Vm(project)
+    renderer = PygameRenderer(project, vm)
+
+    assert callable(vm.pen_clear_hook)
+    assert callable(vm.pen_stamp_hook)
+    assert callable(vm.pen_draw_hook)
+    assert vm.compositor is not None
+
+
+def test_pygame_renderer_pil_to_surface() -> None:
+    """_pil_to_surface must return a pygame Surface with the correct dimensions."""
+    import os
+    import pytest
+
+    pygame = pytest.importorskip("pygame")
+    os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+    os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
+    pygame.init()
+
+    from PIL import Image
+    from sb3vm.render.pygame_display import PygameRenderer
+
+    img = Image.new("RGBA", (32, 16), (255, 0, 0, 128))
+    surf = PygameRenderer._pil_to_surface(img)
+    assert surf.get_width() == 32
+    assert surf.get_height() == 16
+    assert surf.get_flags() & pygame.SRCALPHA
+
+    pygame.quit()
