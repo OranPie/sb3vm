@@ -65,7 +65,7 @@ def _print_run_status(vm: Sb3Vm, step: int, total_steps: int) -> None:
 def cmd_run(args: argparse.Namespace) -> int:
     info(_LOGGER, "cli.run", "running %s for %.3fs dt=%.5f status=%s", args.path, args.seconds, args.dt, args.status)
     project = load_sb3(args.path)
-    vm = Sb3Vm(project)
+    vm = Sb3Vm(project, enable_compilation=not args.status, statements_per_frame=args.statements_per_frame)
     if args.status:
         total_steps = max(0, int(args.seconds / args.dt))
         vm.start_green_flag()
@@ -82,21 +82,21 @@ def cmd_run(args: argparse.Namespace) -> int:
 def cmd_run_display(args: argparse.Namespace) -> int:
     info(_LOGGER, "cli.run_display", "running display renderer for %s", args.path)
     project = load_sb3(args.path)
-    vm = Sb3Vm(project)
+    vm = Sb3Vm(project, enable_compilation=True, statements_per_frame=args.statements_per_frame)
     backend = (args.backend or "auto").lower()
     renderer: MinimalRenderer | PygameRenderer
     if backend == "pygame":
-        renderer = PygameRenderer(project, vm, scale=args.scale, fps=args.fps, show_monitors=args.monitors)
+        renderer = PygameRenderer(project, vm, scale=args.scale, fps=args.fps, show_monitors=args.monitors, runner_budget_ms=args.runner_budget_ms)
     elif backend == "tkinter":
-        renderer = MinimalRenderer(project, vm, scale=args.scale, fps=args.fps, show_monitors=args.monitors)
+        renderer = MinimalRenderer(project, vm, scale=args.scale, fps=args.fps, show_monitors=args.monitors, runner_budget_ms=args.runner_budget_ms)
     else:
         # auto: prefer pygame (faster), fall back to tkinter
         try:
             import pygame as _pg  # noqa: F401
-            renderer = PygameRenderer(project, vm, scale=args.scale, fps=args.fps, show_monitors=args.monitors)
+            renderer = PygameRenderer(project, vm, scale=args.scale, fps=args.fps, show_monitors=args.monitors, runner_budget_ms=args.runner_budget_ms)
             info(_LOGGER, "cli.run_display", "using pygame backend")
         except ModuleNotFoundError:
-            renderer = MinimalRenderer(project, vm, scale=args.scale, fps=args.fps, show_monitors=args.monitors)
+            renderer = MinimalRenderer(project, vm, scale=args.scale, fps=args.fps, show_monitors=args.monitors, runner_budget_ms=args.runner_budget_ms)
             info(_LOGGER, "cli.run_display", "pygame not available, using tkinter backend")
     renderer.run(seconds=args.seconds, dt=args.dt)
     return 0
@@ -208,6 +208,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--seconds", type=float, default=1.0)
     run_p.add_argument("--dt", type=float, default=1 / 30)
     run_p.add_argument("--status", action="store_true")
+    run_p.add_argument("--statements-per-frame", type=int, default=100)
     run_p.set_defaults(func=cmd_run)
 
     display_p = sub.add_parser("run-display")
@@ -216,7 +217,10 @@ def build_parser() -> argparse.ArgumentParser:
     display_p.add_argument("--dt", type=float, default=1 / 30)
     display_p.add_argument("--fps", type=int, default=30)
     display_p.add_argument("--scale", type=float, default=1.0)
-    display_p.add_argument("--monitors", action="store_true", help="Render visible variable monitors on the display canvas.")
+    display_p.add_argument("--monitors", action="store_true", default=True, help="Render visible variable monitors on the display canvas.")
+    display_p.add_argument("--hide-monitors", dest="monitors", action="store_false", help="Hide Scratch variable/list monitors.")
+    display_p.add_argument("--statements-per-frame", type=int, default=100)
+    display_p.add_argument("--runner-budget-ms", type=float, default=8.0, help="Wall-clock VM execution budget per rendered display frame.")
     display_p.add_argument("--backend", choices=["auto", "pygame", "tkinter"], default="auto", help="Rendering backend (default: auto selects pygame if available, else tkinter).")
     display_p.set_defaults(func=cmd_run_display)
 

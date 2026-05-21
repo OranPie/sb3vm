@@ -703,4 +703,5 @@ def main():
     run_output = capsys.readouterr().out
     assert "threads=" in run_output
     assert "stmt=wait(0.2)" in run_output
+    assert "stmt=<compiled>" not in run_output
     assert '"thread_status"' in run_output

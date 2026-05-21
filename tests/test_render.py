@@ -168,6 +168,7 @@ def test_run_display_cli_wires_renderer_without_debug_snapshot(monkeypatch, tmp_
         seen["scale"] = self.scale
         seen["fps"] = self.fps
         seen["show_monitors"] = self.show_monitors
+        seen["runner_budget_ms"] = self.runner_budget_ms
         seen["render_snapshot"] = self.vm.render_snapshot()
 
     monkeypatch.setattr(MinimalRenderer, "run", fake_run)
@@ -177,7 +178,50 @@ def test_run_display_cli_wires_renderer_without_debug_snapshot(monkeypatch, tmp_
     assert seen["fps"] == 12
     assert seen["scale"] == 1.5
     assert seen["show_monitors"] is True
+    assert seen["runner_budget_ms"] == 8.0
     assert "drawables" in seen["render_snapshot"]
+
+
+def test_run_display_cli_defaults_to_fast_compiled_monitor_mode(monkeypatch, tmp_path: Path) -> None:
+    path = tmp_path / "display.sb3"
+    write_sb3(path, _render_project_json(), assets={"bg.png": _png_bytes((255, 0, 0, 255)), "sprite.png": _png_bytes((0, 255, 0, 255))})
+    parser = build_parser()
+    args = parser.parse_args(["run-display", str(path), "--seconds", "0", "--backend", "tkinter"])
+    seen: dict[str, object] = {}
+
+    def fake_run(self: MinimalRenderer, *, seconds: float | None = None, dt: float = 1 / 30) -> None:
+        seen["show_monitors"] = self.show_monitors
+        seen["enable_compilation"] = self.vm.config.enable_compilation
+        seen["statements_per_frame"] = self.vm.config.statements_per_frame
+        seen["runner_budget_ms"] = self.runner_budget_ms
+
+    monkeypatch.setattr(MinimalRenderer, "run", fake_run)
+
+    assert cmd_run_display(args) == 0
+    assert seen["show_monitors"] is True
+    assert seen["enable_compilation"] is True
+    assert seen["statements_per_frame"] == 100
+    assert seen["runner_budget_ms"] == 8.0
+
+
+def test_run_display_cli_can_hide_monitors_and_override_statement_budget(monkeypatch, tmp_path: Path) -> None:
+    path = tmp_path / "display.sb3"
+    write_sb3(path, _render_project_json(), assets={"bg.png": _png_bytes((255, 0, 0, 255)), "sprite.png": _png_bytes((0, 255, 0, 255))})
+    parser = build_parser()
+    args = parser.parse_args(["run-display", str(path), "--seconds", "0", "--backend", "tkinter", "--hide-monitors", "--statements-per-frame", "250", "--runner-budget-ms", "3.5"])
+    seen: dict[str, object] = {}
+
+    def fake_run(self: MinimalRenderer, *, seconds: float | None = None, dt: float = 1 / 30) -> None:
+        seen["show_monitors"] = self.show_monitors
+        seen["statements_per_frame"] = self.vm.config.statements_per_frame
+        seen["runner_budget_ms"] = self.runner_budget_ms
+
+    monkeypatch.setattr(MinimalRenderer, "run", fake_run)
+
+    assert cmd_run_display(args) == 0
+    assert seen["show_monitors"] is False
+    assert seen["statements_per_frame"] == 250
+    assert seen["runner_budget_ms"] == 3.5
 
 
 def test_run_display_cli_uses_interactive_input_provider(monkeypatch, tmp_path: Path) -> None:
@@ -194,6 +238,48 @@ def test_run_display_cli_uses_interactive_input_provider(monkeypatch, tmp_path: 
 
     assert cmd_run_display(args) == 0
     assert isinstance(seen["provider"], InteractiveInputProvider)
+
+
+def test_renderer_frame_runner_respects_budget_and_seconds(monkeypatch, tmp_path: Path) -> None:
+    path = tmp_path / "display.sb3"
+    write_sb3(path, _render_project_json(), assets={"bg.png": _png_bytes((255, 0, 0, 255)), "sprite.png": _png_bytes((0, 255, 0, 255))})
+    project = load_sb3(path)
+    renderer = MinimalRenderer(project, Sb3Vm(project), runner_budget_ms=5.0)
+    step_count = 0
+
+    def fake_step(dt: float) -> None:
+        nonlocal step_count
+        step_count += 1
+        renderer.vm.state.threads[1] = renderer.vm.state.threads.get(1)  # keep truthy without needing a real thread
+
+    clock_values = iter([0.0, 0.001, 0.002, 0.006])
+    monkeypatch.setattr(renderer.vm, "step", fake_step)
+    monkeypatch.setattr("sb3vm.render.display.time.perf_counter", lambda: next(clock_values))
+
+    elapsed = renderer._run_vm_for_frame(seconds=1.0, dt=0.1, elapsed=0.0)
+
+    assert step_count == 3
+    assert elapsed == pytest.approx(0.3)
+
+
+def test_renderer_frame_runner_runs_at_least_once_with_zero_budget(monkeypatch, tmp_path: Path) -> None:
+    path = tmp_path / "display.sb3"
+    write_sb3(path, _render_project_json(), assets={"bg.png": _png_bytes((255, 0, 0, 255)), "sprite.png": _png_bytes((0, 255, 0, 255))})
+    project = load_sb3(path)
+    renderer = MinimalRenderer(project, Sb3Vm(project), runner_budget_ms=0.0)
+    step_count = 0
+
+    def fake_step(dt: float) -> None:
+        nonlocal step_count
+        step_count += 1
+        renderer.vm.state.threads[1] = renderer.vm.state.threads.get(1)
+
+    monkeypatch.setattr(renderer.vm, "step", fake_step)
+
+    elapsed = renderer._run_vm_for_frame(seconds=1.0, dt=0.1, elapsed=0.0)
+
+    assert step_count == 1
+    assert elapsed == pytest.approx(0.1)
 
 
 class _FakeEvent:
@@ -504,6 +590,62 @@ def test_renderer_paints_visible_variable_monitors(tmp_path: Path) -> None:
     assert len(renderer._canvas.drawn_rectangles) == 1
     assert len(renderer._canvas.drawn_text) == 1
     assert renderer._canvas.drawn_text[0]["text"] == "score: 7"
+
+
+def test_renderer_drags_variable_monitor_without_clicking_sprite(monkeypatch, tmp_path: Path) -> None:
+    project_json = _render_project_json()
+    project_json["targets"][0]["variables"] = {"v1": ["score", 7]}
+    project_json["monitors"] = [
+        {
+            "id": "score-monitor",
+            "opcode": "data_variable",
+            "params": {"VARIABLE": "score"},
+            "visible": True,
+            "x": 12,
+            "y": 16,
+            "width": 120,
+            "height": 22,
+        }
+    ]
+    path = tmp_path / "display.sb3"
+    write_sb3(path, project_json, assets={"bg.png": _png_bytes((255, 0, 0, 255)), "sprite.png": _png_bytes((0, 255, 0, 255))})
+    project = load_sb3(path)
+    renderer = MinimalRenderer(project, Sb3Vm(project), show_monitors=True)
+    renderer._canvas = _FakeCanvas()
+    clicked: list[int] = []
+    monkeypatch.setattr(renderer.vm, "emit_sprite_click", lambda instance_id: clicked.append(instance_id) or set())
+
+    renderer._on_mouse_press(_FakeEvent(x=20, y=20))
+    renderer._on_mouse_motion(_FakeEvent(x=40, y=45))
+    renderer._on_mouse_release(_FakeEvent(x=40, y=45))
+
+    assert clicked == []
+    assert project.monitors[0]["x"] == 32
+    assert project.monitors[0]["y"] == 41
+
+
+def test_renderer_reads_visible_list_monitor(tmp_path: Path) -> None:
+    project_json = _render_project_json()
+    project_json["targets"][0]["lists"] = {"l1": ["items", ["a", "b"]]}
+    project_json["monitors"] = [
+        {
+            "id": "items-monitor",
+            "opcode": "data_listcontents",
+            "params": {"LIST": "items"},
+            "visible": True,
+            "x": 12,
+            "y": 16,
+        }
+    ]
+    path = tmp_path / "display.sb3"
+    write_sb3(path, project_json, assets={"bg.png": _png_bytes((255, 0, 0, 255)), "sprite.png": _png_bytes((0, 255, 0, 255))})
+    project = load_sb3(path)
+    renderer = MinimalRenderer(project, Sb3Vm(project), show_monitors=True)
+
+    monitors = renderer._visible_monitors()
+
+    assert monitors[0]["label"] == "items"
+    assert monitors[0]["value"] == ["a", "b"]
 
 
 # ---------------------------------------------------------------------------

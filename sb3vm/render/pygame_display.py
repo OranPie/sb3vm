@@ -15,6 +15,7 @@ because those results are already cached between frames.
 from __future__ import annotations
 
 import math
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -79,7 +80,8 @@ class PygameRenderer:
     vm: Sb3Vm
     scale: float = 1.0
     fps: int = 30
-    show_monitors: bool = False
+    show_monitors: bool = True
+    runner_budget_ms: float = 8.0
     asset_store: RenderAssetStore = field(init=False)
 
     def __post_init__(self) -> None:
@@ -108,6 +110,7 @@ class PygameRenderer:
         self._prompt_active = False
         self._prompt_text = ""
         self._prompt_question = ""
+        self._monitor_drag: dict[str, Any] | None = None
 
         self.input_provider = self._ensure_interactive_input_provider()
 
@@ -196,11 +199,22 @@ class PygameRenderer:
                 elif event.type == pygame.MOUSEMOTION:
                     sx, sy = self.mapper.to_stage(float(event.pos[0]), float(event.pos[1]))
                     self.input_provider.set_mouse_position(sx, sy)
+                    if self._monitor_drag is not None:
+                        self._drag_monitor_to(float(event.pos[0]), float(event.pos[1]))
 
                 elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                     sx, sy = self.mapper.to_stage(float(event.pos[0]), float(event.pos[1]))
                     self.input_provider.set_mouse_position(sx, sy)
                     self.input_provider.set_mouse_button(True)
+                    if self.show_monitors:
+                        monitor = self._monitor_at(float(event.pos[0]), float(event.pos[1]))
+                        if monitor is not None:
+                            self._monitor_drag = {
+                                "monitor": monitor,
+                                "offset_x": float(event.pos[0]) - float(monitor.get("x", 0.0)) * self.scale,
+                                "offset_y": float(event.pos[1]) - float(monitor.get("y", 0.0)) * self.scale,
+                            }
+                            continue
                     iid = self._clicked_sprite(float(event.pos[0]), float(event.pos[1]))
                     if iid is not None:
                         self.vm.emit_sprite_click(iid)
@@ -209,11 +223,11 @@ class PygameRenderer:
                     sx, sy = self.mapper.to_stage(float(event.pos[0]), float(event.pos[1]))
                     self.input_provider.set_mouse_position(sx, sy)
                     self.input_provider.set_mouse_button(False)
+                    self._monitor_drag = None
 
             # ---- VM step ----
             if seconds is None or elapsed < seconds:
-                self.vm.step(dt)
-                elapsed += dt
+                elapsed = self._run_vm_for_frame(seconds=seconds, dt=dt, elapsed=elapsed)
 
             if seconds is not None and elapsed >= seconds:
                 running = False
@@ -228,6 +242,25 @@ class PygameRenderer:
             clock.tick(self.fps)
 
         pygame.quit()
+
+    def _run_vm_for_frame(self, *, seconds: float | None, dt: float, elapsed: float) -> float:
+        if seconds is not None and elapsed >= seconds:
+            return elapsed
+        budget = max(0.0, self.runner_budget_ms) / 1000.0
+        deadline = time.perf_counter() + budget
+        next_elapsed = elapsed
+        ran_once = False
+        while seconds is None or next_elapsed < seconds:
+            self.vm.step(dt)
+            next_elapsed += dt
+            ran_once = True
+            if not self.vm.state.threads:
+                break
+            if budget <= 0.0 or time.perf_counter() >= deadline:
+                break
+        if not ran_once:
+            return elapsed
+        return next_elapsed
 
     # ------------------------------------------------------------------
     # Paint pipeline
@@ -401,6 +434,7 @@ class PygameRenderer:
             text_surf = font.render(text, True, (17, 24, 39))
             box_w = text_surf.get_width() + 16
             box_h = max(22, text_surf.get_height() + 8)
+            self._update_monitor_size(monitor["record"], box_w, box_h)
             pygame.draw.rect(screen, (255, 247, 214), (x, y, box_w, box_h), border_radius=3)
             pygame.draw.rect(screen, (194, 65, 12), (x, y, box_w, box_h), width=1, border_radius=3)
             screen.blit(text_surf, (x + 8, y + (box_h - text_surf.get_height()) // 2))
@@ -409,17 +443,17 @@ class PygameRenderer:
         monitors: list[dict[str, Any]] = []
         fallback_row = 0
         for monitor in self.project.monitors:
-            if str(monitor.get("opcode", "")).strip() != "data_variable":
+            opcode = str(monitor.get("opcode", "")).strip()
+            if opcode not in {"data_variable", "data_listcontents"}:
                 continue
             if not bool(monitor.get("visible", False)):
                 continue
-            variable_name = str(
-                (monitor.get("params") or {}).get("VARIABLE") or ""
-            ).strip()
-            if not variable_name:
+            params = monitor.get("params") or {}
+            data_name = str((params.get("LIST") if opcode == "data_listcontents" else params.get("VARIABLE")) or "").strip()
+            if not data_name:
                 continue
             sprite_name = monitor.get("spriteName")
-            label = str(monitor.get("label") or variable_name)
+            label = str(monitor.get("label") or data_name)
             x_raw = monitor.get("x")
             y_raw = monitor.get("y")
             if isinstance(x_raw, (int, float)) and isinstance(y_raw, (int, float)):
@@ -432,20 +466,47 @@ class PygameRenderer:
             monitors.append(
                 {
                     "label": label,
-                    "value": self._monitor_value(variable_name, sprite_name),
+                    "value": self._monitor_value(data_name, sprite_name, opcode),
                     "x": x,
                     "y": y,
+                    "record": monitor,
                 }
             )
         return monitors
 
-    def _monitor_value(self, variable_name: str, sprite_name: Any) -> Any:
+    def _monitor_value(self, data_name: str, sprite_name: Any, opcode: str = "data_variable") -> Any:
         if isinstance(sprite_name, str) and sprite_name in self.vm.state.original_instance_ids:
             instance_id = self.vm.state.get_original_instance_id(sprite_name)
             instance = self.vm.state.get_instance(instance_id)
-            if variable_name in instance.local_variables:
-                return instance.local_variables[variable_name]
-        return self.vm.state.stage_variables.get(variable_name, 0)
+            if opcode == "data_listcontents" and data_name in instance.local_lists:
+                return instance.local_lists[data_name]
+            if data_name in instance.local_variables:
+                return instance.local_variables[data_name]
+        if opcode == "data_listcontents":
+            return self.vm.state.stage_lists.get(data_name, [])
+        return self.vm.state.stage_variables.get(data_name, 0)
+
+    def _update_monitor_size(self, monitor: dict[str, Any], width: float, height: float) -> None:
+        monitor["width"] = int(round(width / self.scale))
+        monitor["height"] = int(round(height / self.scale))
+
+    def _monitor_at(self, canvas_x: float, canvas_y: float) -> dict[str, Any] | None:
+        for monitor in reversed(self._visible_monitors()):
+            record = monitor["record"]
+            width = float(record.get("width") or 120) * self.scale
+            height = float(record.get("height") or 22) * self.scale
+            x = float(monitor["x"])
+            y = float(monitor["y"])
+            if x <= canvas_x <= x + width and y <= canvas_y <= y + height:
+                return record
+        return None
+
+    def _drag_monitor_to(self, canvas_x: float, canvas_y: float) -> None:
+        if self._monitor_drag is None:
+            return
+        monitor = self._monitor_drag["monitor"]
+        monitor["x"] = int(round((canvas_x - self._monitor_drag["offset_x"]) / self.scale))
+        monitor["y"] = int(round((canvas_y - self._monitor_drag["offset_y"]) / self.scale))
 
     # ------------------------------------------------------------------
     # Prompt (ask block) UI

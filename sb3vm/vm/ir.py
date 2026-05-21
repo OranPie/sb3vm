@@ -75,6 +75,7 @@ SAFE_STMT_KINDS = {
     "list_delete_all",
     "list_insert",
     "list_replace",
+    "monitor_visibility",
     "wait",
     "no_op",
     "graceful_ext",
@@ -214,6 +215,8 @@ def classify_stmt(stmt: IrStmt) -> str | None:
 def _classify_value(value: Any) -> str | None:
     if isinstance(value, IrExpr):
         return classify_expr(value)
+    if isinstance(value, IrStmt):
+        return classify_stmt(value)
     if isinstance(value, tuple):
         for item in value:
             reason = _classify_value(item)
@@ -234,4 +237,3 @@ def classify_expr(expr: IrExpr) -> str | None:
         if reason is not None:
             return reason
     return None
-

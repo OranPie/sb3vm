@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -50,7 +51,8 @@ class MinimalRenderer:
     vm: Sb3Vm
     scale: float = 1.0
     fps: int = 30
-    show_monitors: bool = False
+    show_monitors: bool = True
+    runner_budget_ms: float = 8.0
     asset_store: RenderAssetStore = field(init=False)
 
     def __post_init__(self) -> None:
@@ -69,6 +71,7 @@ class MinimalRenderer:
         self._prompt_entry = None
         self._prompt_button = None
         self._prompt_visible = False
+        self._monitor_drag: dict[str, Any] | None = None
         self.input_provider = self._ensure_interactive_input_provider()
         # Pen layer
         cw = self.mapper.canvas_width
@@ -162,8 +165,7 @@ class MinimalRenderer:
         def tick() -> None:
             next_elapsed = elapsed
             if seconds is None or elapsed < seconds:
-                self.vm.step(dt)
-                next_elapsed += dt
+                next_elapsed = self._run_vm_for_frame(seconds=seconds, dt=dt, elapsed=elapsed)
                 self._paint(self.vm.render_snapshot())
             if seconds is not None and next_elapsed >= seconds:
                 self._root.destroy()
@@ -171,6 +173,25 @@ class MinimalRenderer:
             self._root.after(max(1, int(1000 / self.fps)), lambda: self._schedule_frame(seconds=seconds, dt=dt, elapsed=next_elapsed))
 
         self._root.after(max(1, int(1000 / self.fps)), tick)
+
+    def _run_vm_for_frame(self, *, seconds: float | None, dt: float, elapsed: float) -> float:
+        if seconds is not None and elapsed >= seconds:
+            return elapsed
+        budget = max(0.0, self.runner_budget_ms) / 1000.0
+        deadline = time.perf_counter() + budget
+        next_elapsed = elapsed
+        ran_once = False
+        while seconds is None or next_elapsed < seconds:
+            self.vm.step(dt)
+            next_elapsed += dt
+            ran_once = True
+            if not self.vm.state.threads:
+                break
+            if budget <= 0.0 or time.perf_counter() >= deadline:
+                break
+        if not ran_once:
+            return elapsed
+        return next_elapsed
 
     def _maybe_start_vm(self) -> None:
         if not self._started:
@@ -453,12 +474,23 @@ class MinimalRenderer:
 
     def _on_mouse_motion(self, event: Any) -> None:
         self._sync_mouse(event)
+        if self._monitor_drag is not None:
+            self._drag_monitor_to(float(getattr(event, "x", 0.0)), float(getattr(event, "y", 0.0)))
 
     def _on_mouse_press(self, event: Any) -> None:
         self._sync_mouse(event)
         self.input_provider.set_mouse_button(True)
         if self._canvas is not None:
             self._canvas.focus_set()
+        if self.show_monitors:
+            monitor = self._monitor_at(float(getattr(event, "x", 0.0)), float(getattr(event, "y", 0.0)))
+            if monitor is not None:
+                self._monitor_drag = {
+                    "monitor": monitor,
+                    "offset_x": float(getattr(event, "x", 0.0)) - float(monitor.get("x", 0.0)) * self.scale,
+                    "offset_y": float(getattr(event, "y", 0.0)) - float(monitor.get("y", 0.0)) * self.scale,
+                }
+                return
         instance_id = self._clicked_sprite_instance_id(float(getattr(event, "x", 0.0)), float(getattr(event, "y", 0.0)))
         if instance_id is not None:
             self.vm.emit_sprite_click(instance_id)
@@ -466,9 +498,11 @@ class MinimalRenderer:
     def _on_mouse_release(self, event: Any) -> None:
         self._sync_mouse(event)
         self.input_provider.set_mouse_button(False)
+        self._monitor_drag = None
 
     def _on_mouse_leave(self, event: Any) -> None:
         self.input_provider.set_mouse_button(False)
+        self._monitor_drag = None
 
     def _clicked_sprite_instance_id(self, canvas_x: float, canvas_y: float) -> int | None:
         snapshot = self._last_render_snapshot or self.vm.render_snapshot()
@@ -496,12 +530,13 @@ class MinimalRenderer:
 
     def _paint_monitors(self) -> None:
         assert self._canvas is not None
-        for monitor in self._visible_variable_monitors():
+        for monitor in self._visible_monitors():
             text = f"{monitor['label']}: {monitor['value']}"
             x = float(monitor["x"])
             y = float(monitor["y"])
             box_width = max(120.0 * self.scale, 16.0 * self.scale + len(text) * 7.0 * self.scale)
             box_height = 22.0 * self.scale
+            self._update_monitor_size(monitor["record"], box_width, box_height)
             self._canvas.create_rectangle(
                 x,
                 y,
@@ -519,19 +554,21 @@ class MinimalRenderer:
                 fill="#111827",
             )
 
-    def _visible_variable_monitors(self) -> list[dict[str, Any]]:
+    def _visible_monitors(self) -> list[dict[str, Any]]:
         monitors: list[dict[str, Any]] = []
         fallback_row = 0
         for monitor in self.project.monitors:
-            if str(monitor.get("opcode", "")).strip() != "data_variable":
+            opcode = str(monitor.get("opcode", "")).strip()
+            if opcode not in {"data_variable", "data_listcontents"}:
                 continue
             if not bool(monitor.get("visible", False)):
                 continue
-            variable_name = str((monitor.get("params") or {}).get("VARIABLE") or "").strip()
-            if not variable_name:
+            params = monitor.get("params") or {}
+            data_name = str((params.get("LIST") if opcode == "data_listcontents" else params.get("VARIABLE")) or "").strip()
+            if not data_name:
                 continue
             sprite_name = monitor.get("spriteName")
-            label = str(monitor.get("label") or variable_name)
+            label = str(monitor.get("label") or data_name)
             x_raw = monitor.get("x")
             y_raw = monitor.get("y")
             if isinstance(x_raw, (int, float)) and isinstance(y_raw, (int, float)):
@@ -544,20 +581,47 @@ class MinimalRenderer:
             monitors.append(
                 {
                     "label": label,
-                    "value": self._monitor_value(variable_name, sprite_name),
+                    "value": self._monitor_value(data_name, sprite_name, opcode),
                     "x": x,
                     "y": y,
+                    "record": monitor,
                 }
             )
         return monitors
 
-    def _monitor_value(self, variable_name: str, sprite_name: Any) -> Any:
+    def _monitor_value(self, data_name: str, sprite_name: Any, opcode: str = "data_variable") -> Any:
         if isinstance(sprite_name, str) and sprite_name in self.vm.state.original_instance_ids:
             instance_id = self.vm.state.get_original_instance_id(sprite_name)
             instance = self.vm.state.get_instance(instance_id)
-            if variable_name in instance.local_variables:
-                return instance.local_variables[variable_name]
-        return self.vm.state.stage_variables.get(variable_name, 0)
+            if opcode == "data_listcontents" and data_name in instance.local_lists:
+                return instance.local_lists[data_name]
+            if data_name in instance.local_variables:
+                return instance.local_variables[data_name]
+        if opcode == "data_listcontents":
+            return self.vm.state.stage_lists.get(data_name, [])
+        return self.vm.state.stage_variables.get(data_name, 0)
+
+    def _update_monitor_size(self, monitor: dict[str, Any], width: float, height: float) -> None:
+        monitor["width"] = int(round(width / self.scale))
+        monitor["height"] = int(round(height / self.scale))
+
+    def _monitor_at(self, canvas_x: float, canvas_y: float) -> dict[str, Any] | None:
+        for monitor in reversed(self._visible_monitors()):
+            record = monitor["record"]
+            width = float(record.get("width") or 120) * self.scale
+            height = float(record.get("height") or 22) * self.scale
+            x = float(monitor["x"])
+            y = float(monitor["y"])
+            if x <= canvas_x <= x + width and y <= canvas_y <= y + height:
+                return record
+        return None
+
+    def _drag_monitor_to(self, canvas_x: float, canvas_y: float) -> None:
+        if self._monitor_drag is None:
+            return
+        monitor = self._monitor_drag["monitor"]
+        monitor["x"] = int(round((canvas_x - self._monitor_drag["offset_x"]) / self.scale))
+        monitor["y"] = int(round((canvas_y - self._monitor_drag["offset_y"]) / self.scale))
 
     def _sync_prompt(self, snapshot: dict[str, Any]) -> None:
         prompt = None

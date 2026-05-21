@@ -561,12 +561,19 @@ class ProjectParser:
             return Stmt("wait_until", {"condition": expr("CONDITION")})
         if opcode == "motion_ifedgebounce":
             return Stmt("move_state", {"mode": "if_edge_bounce"})
+        if opcode == "data_showvariable":
+            return Stmt("monitor_visibility", {"kind": "variable", "name": f(block, "VARIABLE") or "", "visible": True})
+        if opcode == "data_hidevariable":
+            return Stmt("monitor_visibility", {"kind": "variable", "name": f(block, "VARIABLE") or "", "visible": False})
+        if opcode == "data_showlist":
+            return Stmt("monitor_visibility", {"kind": "list", "name": f(block, "LIST") or "", "visible": True})
+        if opcode == "data_hidelist":
+            return Stmt("monitor_visibility", {"kind": "list", "name": f(block, "LIST") or "", "visible": False})
         if opcode in {
             "sound_play", "sound_playuntildone", "sound_stopallsounds",
             "sound_setvolumeto", "sound_changevolumeby",
             "sound_seteffectto", "sound_changeeffectby", "sound_cleareffects",
             "sound_sounds_menu",
-            "data_showvariable", "data_hidevariable", "data_showlist", "data_hidelist",
             "sensing_setdragmode",
         }:
             return Stmt("no_op", {})

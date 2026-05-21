@@ -35,6 +35,7 @@ class VmConfig:
     random_seed: int | None = None
     enable_compilation: bool = False
     lazy_compile_threshold: int | None = None
+    statements_per_frame: int = 1
 
 
 class Sb3Vm:
@@ -47,6 +48,7 @@ class Sb3Vm:
         random_seed: int | None = None,
         enable_compilation: bool = False,
         lazy_compile_threshold: int | None = None,
+        statements_per_frame: int = 1,
         input_provider: InputProvider | None = None,
     ) -> None:
         self.project = project
@@ -56,6 +58,7 @@ class Sb3Vm:
             random_seed=random_seed,
             enable_compilation=enable_compilation,
             lazy_compile_threshold=lazy_compile_threshold,
+            statements_per_frame=max(1, int(statements_per_frame)),
         )
         self.input_provider: InputProvider = input_provider or HeadlessInputProvider()
         self.rng = VmRng(random_seed)
@@ -87,6 +90,7 @@ class Sb3Vm:
             for key, script in zip(self.ir_scripts, self.scripts)
         }
         self._compiled_scripts: dict[str, CompiledScript] = {}
+        self._compile_failures: set[str] = set()
         self._script_runs: dict[str, int] = {key: 0 for key in self.ir_scripts}
         self.state = VMState.from_project(project)
         self._next_thread_id = 1
@@ -515,22 +519,23 @@ class Sb3Vm:
             if action == "block":
                 return
             executed += 1
-            if not thread.in_warp() and executed >= 1:
+            if not thread.in_warp() and executed >= self.config.statements_per_frame:
                 return
 
     def _advance_compiled_thread(self, thread: ThreadState) -> None:
         if thread.compiled_runner is None:
             return
         thread.current_stmt = None
-        try:
-            action = next(thread.compiled_runner)
-        except StopIteration:
-            thread.done = True
-            return
-        if action == "block":
-            return
-        if action == "yield":
-            return
+        for _ in range(self.config.statements_per_frame):
+            try:
+                action = next(thread.compiled_runner)
+            except StopIteration:
+                thread.done = True
+                return
+            if action == "block":
+                return
+            if action == "yield":
+                return
 
     def _execute_stmt(self, thread: ThreadState, stmt: Stmt) -> str | None:
         instance = self.state.get_instance(thread.instance_id)
@@ -565,6 +570,9 @@ class Sb3Vm:
             idx = resolve_list_index(eval_expr(stmt.args["index"], self.state, thread, self), len(lst), random_index=self.random_index)
             if idx is not None:
                 lst[idx] = eval_expr(stmt.args["item"], self.state, thread, self)
+            return None
+        if kind == "monitor_visibility":
+            self._set_monitor_visible(thread.instance_id, stmt.args["name"], bool(stmt.args["visible"]), stmt.args.get("kind", "variable"))
             return None
         if kind == "wait":
             thread.wake_time = self.state.time_seconds + max(0.0, to_number(eval_expr(stmt.args["duration"], self.state, thread, self)))
@@ -810,6 +818,38 @@ class Sb3Vm:
         if name in target.local_lists or name not in self.state.stage_lists:
             return target.local_lists.setdefault(name, [])
         return self.state.stage_lists.setdefault(name, [])
+
+    def _set_monitor_visible(self, instance_id: int, name: str, visible: bool, monitor_kind: str = "variable") -> None:
+        opcode = "data_listcontents" if monitor_kind == "list" else "data_variable"
+        target = self.state.get_instance(instance_id)
+        sprite_name: str | None = None if target.is_stage else target.source_target_name
+        for monitor in self.project.monitors:
+            if str(monitor.get("opcode", "")).strip() != opcode:
+                continue
+            params = monitor.get("params") or {}
+            param_name = "LIST" if monitor_kind == "list" else "VARIABLE"
+            if params.get(param_name) != name:
+                continue
+            if monitor.get("spriteName") != sprite_name:
+                continue
+            monitor["visible"] = visible
+            return
+        monitor = {
+            "id": f"{target.source_target_name}:{opcode}:{name}",
+            "mode": "default",
+            "opcode": opcode,
+            "params": {"LIST" if monitor_kind == "list" else "VARIABLE": name},
+            "spriteName": sprite_name,
+            "value": self._get_list(instance_id, name) if monitor_kind == "list" else self._get_var(instance_id, name),
+            "width": 0,
+            "height": 0,
+            "x": 8,
+            "y": 8 + 28 * len(self.project.monitors),
+            "visible": visible,
+        }
+        if sprite_name is None:
+            monitor.pop("spriteName")
+        self.project.monitors.append(monitor)
 
     def _resolve_insert_index_value(self, index: Any, length: int) -> int:
         return resolve_insert_index(index, length, random_index=self.random_index)
@@ -1109,6 +1149,8 @@ class Sb3Vm:
         self._script_runs[script_key] = self._script_runs.get(script_key, 0) + 1
         if not self.config.enable_compilation:
             return None
+        if script_key in self._compile_failures:
+            return None
         ir_script = self.ir_scripts[script_key]
         if not ir_script.compile_safe:
             return None
@@ -1117,7 +1159,12 @@ class Sb3Vm:
             return None
         compiled = self._compiled_scripts.get(script_key)
         if compiled is None:
-            compiled = compile_script(ir_script)
+            try:
+                compiled = compile_script(ir_script)
+            except ValueError as exc:
+                self._compile_failures.add(script_key)
+                warn(_LOGGER, "vm.Sb3Vm._compiled_for_key", "falling back to interpreter script=%s reason=%s", script_key, exc)
+                return None
             self._compiled_scripts[script_key] = compiled
         return compiled
 

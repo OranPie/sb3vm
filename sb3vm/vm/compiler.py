@@ -47,7 +47,7 @@ def compile_stmt(stmt: IrStmt) -> StmtFn:
 
         def run(vm: Any, thread: Any) -> CompiledRunner:
             vm._set_var(thread.instance_id, name, value_fn(vm, thread))
-            yield "yield"
+            yield None
 
         return run
     if kind == "change_var":
@@ -57,7 +57,7 @@ def compile_stmt(stmt: IrStmt) -> StmtFn:
         def run(vm: Any, thread: Any) -> CompiledRunner:
             cur = vm._get_var(thread.instance_id, name)
             vm._set_var(thread.instance_id, name, to_number(cur) + to_number(value_fn(vm, thread)))
-            yield "yield"
+            yield None
 
         return run
     if kind == "list_add":
@@ -66,7 +66,7 @@ def compile_stmt(stmt: IrStmt) -> StmtFn:
 
         def run(vm: Any, thread: Any) -> CompiledRunner:
             vm._get_list(thread.instance_id, name).append(item_fn(vm, thread))
-            yield "yield"
+            yield None
 
         return run
     if kind == "list_delete":
@@ -78,7 +78,7 @@ def compile_stmt(stmt: IrStmt) -> StmtFn:
             idx = resolve_list_index(index_fn(vm, thread), len(lst), random_index=vm.random_index)
             if idx is not None:
                 del lst[idx]
-            yield "yield"
+            yield None
 
         return run
     if kind == "list_delete_all":
@@ -86,7 +86,7 @@ def compile_stmt(stmt: IrStmt) -> StmtFn:
 
         def run(vm: Any, thread: Any) -> CompiledRunner:
             vm._get_list(thread.instance_id, name).clear()
-            yield "yield"
+            yield None
 
         return run
     if kind == "list_insert":
@@ -98,7 +98,7 @@ def compile_stmt(stmt: IrStmt) -> StmtFn:
             lst = vm._get_list(thread.instance_id, name)
             idx = vm._resolve_insert_index_value(index_fn(vm, thread), len(lst))
             lst.insert(idx, item_fn(vm, thread))
-            yield "yield"
+            yield None
 
         return run
     if kind == "list_replace":
@@ -111,7 +111,17 @@ def compile_stmt(stmt: IrStmt) -> StmtFn:
             idx = resolve_list_index(index_fn(vm, thread), len(lst), random_index=vm.random_index)
             if idx is not None:
                 lst[idx] = item_fn(vm, thread)
-            yield "yield"
+            yield None
+
+        return run
+    if kind == "monitor_visibility":
+        name = stmt.get("name")
+        visible = bool(stmt.get("visible"))
+        monitor_kind = stmt.get("kind")
+
+        def run(vm: Any, thread: Any) -> CompiledRunner:
+            vm._set_monitor_visible(thread.instance_id, name, visible, monitor_kind)
+            yield None
 
         return run
     if kind == "wait":
@@ -194,7 +204,7 @@ def compile_stmt(stmt: IrStmt) -> StmtFn:
             if wait and child_ids:
                 yield "block"
             else:
-                yield "yield"
+                yield None
 
         return run
     if kind == "ask":
@@ -208,7 +218,7 @@ def compile_stmt(stmt: IrStmt) -> StmtFn:
                 yield "block"
                 return
             vm.input_provider.set_answer(answer)
-            yield "yield"
+            yield None
 
         return run
     if kind == "stop":
@@ -231,7 +241,7 @@ def compile_stmt(stmt: IrStmt) -> StmtFn:
             if result == "block":
                 yield "block"
             else:
-                yield "yield"
+                yield None
 
         return run
     if kind == "looks_state":
@@ -245,23 +255,23 @@ def compile_stmt(stmt: IrStmt) -> StmtFn:
             if result == "block":
                 yield "block"
             else:
-                yield "yield"
+                yield None
 
         return run
     if kind == "reset_timer":
         def run(vm: Any, thread: Any) -> CompiledRunner:
             vm.state.reset_timer()
-            yield "yield"
+            yield None
 
         return run
     if kind == "no_op":
         def run(vm: Any, thread: Any) -> CompiledRunner:
-            yield "yield"
+            yield None
 
         return run
     if kind == "graceful_ext":
         def run(vm: Any, thread: Any) -> CompiledRunner:
-            yield "yield"
+            yield None
 
         return run
     if kind == "music_play_drum":
@@ -282,7 +292,7 @@ def compile_stmt(stmt: IrStmt) -> StmtFn:
         return run
     if kind == "music_set_instrument":
         def run(vm: Any, thread: Any) -> CompiledRunner:
-            yield "yield"
+            yield None
 
         return run
     if kind == "music_set_tempo":
@@ -291,7 +301,7 @@ def compile_stmt(stmt: IrStmt) -> StmtFn:
         def run(vm: Any, thread: Any) -> CompiledRunner:
             val = to_number(tempo_fn(vm, thread))
             vm.state.music_tempo = max(20.0, min(500.0, float(val)))
-            yield "yield"
+            yield None
 
         return run
     if kind == "music_change_tempo":
@@ -300,7 +310,7 @@ def compile_stmt(stmt: IrStmt) -> StmtFn:
         def run(vm: Any, thread: Any) -> CompiledRunner:
             delta = to_number(delta_fn(vm, thread))
             vm.state.music_tempo = max(20.0, min(500.0, vm.state.music_tempo + float(delta)))
-            yield "yield"
+            yield None
 
         return run
     # Pen statements: delegate to interpreter-mode exec_ext_stmt at runtime
@@ -309,7 +319,7 @@ def compile_stmt(stmt: IrStmt) -> StmtFn:
 
         def run(vm: Any, thread: Any) -> CompiledRunner:
             exec_pen_stmt(kind, stmt, thread, vm)
-            yield "yield"
+            yield None
 
         return run
     raise ValueError(f"Unsupported compiled statement: {kind}")
@@ -449,4 +459,3 @@ def compile_expr(expr: IrExpr) -> ExprFn:
     if kind == "graceful_ext":
         return lambda vm, thread: ""
     raise ValueError(f"Unsupported compiled expression: {kind}")
-

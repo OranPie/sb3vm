@@ -93,6 +93,58 @@ def test_lazy_hot_promotion_compiles_after_threshold() -> None:
     assert script_key in vm._compiled_scripts
 
 
+def test_nested_unsupported_statement_is_not_marked_compile_safe() -> None:
+    project = Project.from_json(
+        {
+            "targets": [
+                {
+                    "isStage": True,
+                    "name": "Stage",
+                    "variables": {},
+                    "lists": {},
+                    "broadcasts": {},
+                    "blocks": {},
+                    "comments": {},
+                    "costumes": [{"name": "backdrop1"}],
+                    "sounds": [],
+                },
+                {
+                    "isStage": False,
+                    "name": "Sprite1",
+                    "variables": {},
+                    "lists": {},
+                    "broadcasts": {},
+                    "blocks": {
+                        "hat": {"opcode": "event_whenflagclicked", "next": "repeat", "parent": None, "inputs": {}, "fields": {}, "topLevel": True},
+                        "repeat": {"opcode": "control_repeat", "next": None, "parent": "hat", "inputs": {"TIMES": [1, [4, "1"]], "SUBSTACK": [2, "clone"]}, "fields": {}, "topLevel": False},
+                        "clone": {"opcode": "control_create_clone_of", "next": None, "parent": "repeat", "inputs": {}, "fields": {"CLONE_OPTION": ["myself", None]}, "topLevel": False},
+                    },
+                    "comments": {},
+                    "costumes": [{"name": "one"}],
+                    "sounds": [],
+                    "x": 0,
+                    "y": 0,
+                    "visible": True,
+                    "currentCostume": 0,
+                },
+            ],
+            "monitors": [],
+            "extensions": [],
+            "meta": {"semver": "3.0.0"},
+        }
+    )
+    vm = Sb3Vm(project, enable_compilation=True)
+    capability = next(iter(vm.inspect()["script_capabilities"].values()))
+
+    assert capability["compile_safe"] is False
+    assert capability["reason"] == "stmt:create_clone"
+
+    vm.run_for(0.2)
+
+    assert vm.state.live_clone_count() == 1
+    assert vm.inspect()["script_capabilities"][next(iter(vm.inspect()["script_capabilities"]))]["compiled"] is False
+
+
 def test_benchmark_case_returns_timing_shape() -> None:
     project = _project(
         {

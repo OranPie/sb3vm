@@ -2370,6 +2370,45 @@ def test_data_show_hide_variable_are_no_ops(tmp_path):
     assert vm.inspect()["unsupported_scripts"] == []
 
 
+def test_data_show_hide_variable_updates_monitor_visibility(tmp_path):
+    stage_blocks = {
+        "hat": {"opcode": "event_whenflagclicked", "next": "show", "parent": None, "inputs": {}, "fields": {}, "topLevel": True},
+        "show": {
+            "opcode": "data_showvariable",
+            "next": "hide",
+            "parent": "hat",
+            "inputs": {},
+            "fields": {"VARIABLE": ["score", "v1"]},
+            "topLevel": False,
+        },
+        "hide": {
+            "opcode": "data_hidevariable",
+            "next": None,
+            "parent": "show",
+            "inputs": {},
+            "fields": {"VARIABLE": ["score", "v1"]},
+            "topLevel": False,
+        },
+    }
+    project = _base_project(blocks_stage=stage_blocks)
+    project["monitors"] = [
+        {
+            "id": "score-monitor",
+            "opcode": "data_variable",
+            "params": {"VARIABLE": "score"},
+            "visible": False,
+        }
+    ]
+    path = tmp_path / "show_hide_monitor.sb3"
+    write_sb3(path, project)
+
+    vm = Sb3Vm(load_sb3(path))
+    vm.run_for(0.1)
+
+    assert vm.project.monitors[0]["visible"] is False
+    assert vm.inspect()["unsupported_scripts"] == []
+
+
 def test_motion_movesteps_moves_in_direction(tmp_path):
     sprite_blocks = {
         "hat": {"opcode": "event_whenflagclicked", "next": "move", "parent": None, "inputs": {}, "fields": {}, "topLevel": True},
